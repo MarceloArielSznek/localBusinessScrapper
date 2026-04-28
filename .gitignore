@@ -1,0 +1,10 @@
+node_modules/
+dist/
+output/
+CSV/
+JSON/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log

@@ -1,0 +1,34 @@
+{
+  "name": "yelpscrapper",
+  "version": "1.0.0",
+  "description": "Interactive lead scraper for service companies.",
+  "type": "module",
+  "bin": {
+    "yelp-scrapper": "./src/cli.ts"
+  },
+  "scripts": {
+    "scrape": "tsx src/cli.ts",
+    "enrich": "tsx src/summaryWorker.ts",
+    "smoke": "tsx src/cli.ts --service \"plumber\" --area \"Miami, FL\" --target 2 --min-reviews 100 --fallback true --sources fixture --output-dir output/smoke --headless true --api-enrichment false --company-summaries false",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test && npm run smoke"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@inquirer/prompts": "^8.4.2",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
+    "playwright": "^1.59.1",
+    "slugify": "^1.6.9",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  }
+}
