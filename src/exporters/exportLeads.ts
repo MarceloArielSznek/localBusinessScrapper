@@ -23,6 +23,11 @@ const columns = [
   "website_review_count",
   "summary_status",
   "summary_updated_at",
+  "key_people",
+  "decision_maker",
+  "outreach_status",
+  "suggested_demo_invite",
+  "contact_discovery_notes",
   "sources",
   "source_urls",
 ];
@@ -57,6 +62,17 @@ function toCsv(input: ScraperInput, leads: CompanyLead[]): string {
     lead.websiteReviewCount,
     lead.summaryStatus,
     lead.summaryUpdatedAt,
+    lead.keyPeople
+      ?.map((person) =>
+        [person.name, person.role, person.email, person.emailConfidence, person.linkedinUrl, person.status]
+          .filter(Boolean)
+          .join(" - "),
+      )
+      .join("|"),
+    lead.keyPeople?.find((person) => person.status === "ready_for_outreach")?.name,
+    lead.outreachStatus,
+    lead.suggestedDemoInvite,
+    lead.contactDiscoveryNotes,
     lead.sources.join("|"),
     lead.sourceUrls.join("|"),
   ]);

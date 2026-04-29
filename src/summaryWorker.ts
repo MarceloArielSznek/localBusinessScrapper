@@ -134,7 +134,7 @@ function needsEnrichment(lead: CompanyLead, refresh: boolean): boolean {
     return false;
   }
 
-  return !lead.companySummary || lead.leadQualityScore === undefined || lead.summaryStatus === "pending";
+  return !lead.companySummary || lead.summaryStatus === "pending";
 }
 
 async function saveProgress(input: ScraperInput, leads: CompanyLead[]): Promise<void> {
@@ -159,7 +159,7 @@ async function processOnce(filePath: string, refresh: boolean): Promise<{ proces
           ...enriched,
           summaryStatus: "failed",
           summaryUpdatedAt: new Date().toISOString(),
-          salesNotes: enriched.salesNotes ?? "Menaia summary unavailable: the company website could not be crawled.",
+          salesNotes: enriched.salesNotes ?? "Website summary unavailable: the company website could not be crawled.",
         };
     processed += 1;
     await saveProgress(scraperInput, leads);

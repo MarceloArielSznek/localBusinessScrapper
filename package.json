@@ -7,8 +7,14 @@
     "yelp-scrapper": "./src/cli.ts"
   },
   "scripts": {
+    "api": "tsx src/apiServer.ts",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
     "scrape": "tsx src/cli.ts",
     "enrich": "tsx src/summaryWorker.ts",
+    "ui": "npm --prefix ui run dev",
+    "ui:build": "npm --prefix ui run build",
+    "dev": "concurrently \"npm run api\" \"npm run ui\"",
     "smoke": "tsx src/cli.ts --service \"plumber\" --area \"Miami, FL\" --target 2 --min-reviews 100 --fallback true --sources fixture --output-dir output/smoke --headless true --api-enrichment false --company-summaries false",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -21,12 +27,16 @@
     "@inquirer/prompts": "^8.4.2",
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
+    "pg": "^8.20.0",
     "playwright": "^1.59.1",
     "slugify": "^1.6.9",
+    "write-excel-file": "^4.0.4",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "@types/pg": "^8.20.0",
+    "concurrently": "^9.2.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"

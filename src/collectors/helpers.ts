@@ -1,4 +1,5 @@
 import type { Page } from "playwright";
+import type { CollectorContext } from "../types.js";
 import { normalizeWhitespace } from "../core/normalize.js";
 
 export async function politeDelay(ms: number): Promise<void> {
@@ -22,4 +23,20 @@ export function cleanTitle(value: string): string {
     .replace(/\s+\|\s+.*$/, "")
     .replace(/\s+\(\d+.*$/, "")
     .trim();
+}
+
+export function searchLocation(context: CollectorContext): string {
+  if (context.address && context.radiusMiles) {
+    return `within ${context.radiusMiles} miles of ${context.address}`;
+  }
+
+  if (context.address) {
+    return `near ${context.address}`;
+  }
+
+  if (context.state && context.state.trim().toLowerCase() !== context.area.trim().toLowerCase()) {
+    return `${context.area}, ${context.state}`;
+  }
+
+  return context.state || context.area;
 }

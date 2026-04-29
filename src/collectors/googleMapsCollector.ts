@@ -1,7 +1,7 @@
 import { chromium } from "playwright";
 import type { Collector, CollectorContext, CompanyCandidate } from "../types.js";
 import { extractPhones, parseRating, parseReviewCount } from "../core/extractors.js";
-import { cleanTitle, politeDelay, safeGoto } from "./helpers.js";
+import { cleanTitle, politeDelay, safeGoto, searchLocation } from "./helpers.js";
 
 export class GoogleMapsCollector implements Collector {
   readonly name = "google-maps" as const;
@@ -13,10 +13,11 @@ export class GoogleMapsCollector implements Collector {
     });
 
     try {
+      const location = searchLocation(context);
       const queries = [
-        `${context.service} in ${context.area}`,
-        `${context.service} companies in ${context.area}`,
-        `${context.service} contractors in ${context.area}`,
+        `${context.service} in ${location}`,
+        `${context.service} companies in ${location}`,
+        `${context.service} contractors in ${location}`,
       ];
       const candidates: CompanyCandidate[] = [];
 

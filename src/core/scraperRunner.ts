@@ -20,6 +20,13 @@ export async function runScraper(input: ScraperInput): Promise<ScrapeResult> {
       const collected = await collector.collect({
         service: input.service,
         area: input.area,
+        state: input.state,
+        address: input.address,
+        radiusMiles: input.radiusMiles,
+        minRating: input.minRating,
+        includeServiceAreaBusinesses: input.includeServiceAreaBusinesses,
+        openNow: input.openNow,
+        rankPreference: input.rankPreference,
         maxPages: input.maxPagesPerSource,
         delayMs: input.delayMs,
         headless: input.headless,
@@ -38,7 +45,9 @@ export async function runScraper(input: ScraperInput): Promise<ScrapeResult> {
 
     const unique = dedupeCandidates(candidates, input.minReviews);
     const apiEnriched = await enrichFromGooglePlaces(unique, input.apiEnrichment);
-    const websiteEnriched = await enrichFromWebsites(apiEnriched);
+    const shouldCrawlWebsitesDuringSearch =
+      input.companySummaries || input.sources.some((source) => source !== "google-places-api" && source !== "fixture");
+    const websiteEnriched = shouldCrawlWebsitesDuringSearch ? await enrichFromWebsites(apiEnriched) : apiEnriched;
     const enriched = await enrichCompanyIntelligence(websiteEnriched, input.companySummaries, input.minReviews);
     const ranked = rankLeads(enriched, input.targetCount, input.minReviews, input.fallback);
     const outputFiles = await exportLeads(input, ranked);

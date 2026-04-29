@@ -1,7 +1,7 @@
 import { chromium } from "playwright";
 import type { Collector, CollectorContext, CompanyCandidate } from "../types.js";
 import { parseRating, parseReviewCount } from "../core/extractors.js";
-import { cleanTitle, politeDelay, safeGoto } from "./helpers.js";
+import { cleanTitle, politeDelay, safeGoto, searchLocation } from "./helpers.js";
 
 export class GoogleSearchCollector implements Collector {
   readonly name = "google-search" as const;
@@ -14,10 +14,11 @@ export class GoogleSearchCollector implements Collector {
     });
 
     try {
+      const location = searchLocation(context);
       const queries = [
-        `${context.service} ${context.area} reviews phone`,
-        `${context.service} ${context.area} contact website`,
-        `${context.service} ${context.area} "reviews"`,
+        `${context.service} ${location} reviews phone`,
+        `${context.service} ${location} contact website`,
+        `${context.service} ${location} "reviews"`,
       ].slice(0, context.maxPages);
 
       const candidates: CompanyCandidate[] = [];

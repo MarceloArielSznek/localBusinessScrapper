@@ -6,10 +6,20 @@ const PHONE_RE = /(?:\+?1[\s.-]?)?(?:\(?[2-9]\d{2}\)?[\s.-]?)?[2-9]\d{2}[\s.-]?\
 
 const blockedEmailTerms = ["example.com", "domain.com", "email.com", "sentry.io"];
 
+function isLikelyEmail(email: string): boolean {
+  const [localPart] = email.split("@");
+  if (!localPart || /^\d/.test(localPart)) {
+    return false;
+  }
+
+  const digitCount = (localPart.match(/\d/g) ?? []).length;
+  return digitCount < 4;
+}
+
 export function extractEmails(text: string): string[] {
   const matches = text.match(EMAIL_RE) ?? [];
   return [...new Set(matches.map((email) => email.toLowerCase()))].filter(
-    (email) => !blockedEmailTerms.some((blocked) => email.includes(blocked)),
+    (email) => isLikelyEmail(email) && !blockedEmailTerms.some((blocked) => email.includes(blocked)),
   );
 }
 

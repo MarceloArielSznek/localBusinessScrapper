@@ -9,7 +9,7 @@ type CliArgs = Partial<Omit<ScraperInput, "sources">> & {
   sources?: SourceName[];
 };
 
-const defaultSources: SourceName[] = ["google-search", "yelp", "google-maps"];
+const defaultSources: SourceName[] = ["google-places-api"];
 
 function parseArgs(argv: string[]): CliArgs {
   const args: Record<string, string | boolean> = {};
@@ -36,20 +36,30 @@ function parseArgs(argv: string[]): CliArgs {
   return {
     service: args.service ? String(args.service) : undefined,
     area: args.area ? String(args.area) : undefined,
+    state: args.state !== undefined ? String(args.state) : undefined,
+    address: args.address !== undefined ? String(args.address) : undefined,
+    radiusMiles: args.radiusMiles ? Number(args.radiusMiles) : undefined,
     targetCount: args.target ? Number(args.target) : args.targetCount ? Number(args.targetCount) : undefined,
     minReviews: args.minReviews ? Number(args.minReviews) : undefined,
+    minRating: args.minRating ? Number(args.minRating) : undefined,
     fallback: parseBoolean(args.fallback === undefined ? undefined : String(args.fallback)),
     sources: parseSourceList(args.sources === undefined ? undefined : String(args.sources)),
     outputDir: args.outputDir ? String(args.outputDir) : undefined,
     headless: parseBoolean(args.headless === undefined ? undefined : String(args.headless)),
     apiEnrichment: parseBoolean(args.apiEnrichment === undefined ? undefined : String(args.apiEnrichment)),
     companySummaries: parseBoolean(args.companySummaries === undefined ? undefined : String(args.companySummaries)),
+    includeServiceAreaBusinesses: parseBoolean(
+      args.includeServiceAreaBusinesses === undefined ? undefined : String(args.includeServiceAreaBusinesses),
+    ),
+    openNow: parseBoolean(args.openNow === undefined ? undefined : String(args.openNow)),
+    rankPreference: args.rankPreference === "DISTANCE" ? "DISTANCE" : args.rankPreference === "RELEVANCE" ? "RELEVANCE" : undefined,
     maxPagesPerSource: args.maxPages ? Number(args.maxPages) : undefined,
     delayMs: args.delayMs ? Number(args.delayMs) : undefined,
   };
 }
 
 async function promptForMissing(args: CliArgs): Promise<ScraperInput> {
+  const isNonInteractive = Boolean(args.service && args.area);
   const service =
     args.service ??
     (await input({
@@ -61,10 +71,39 @@ async function promptForMissing(args: CliArgs): Promise<ScraperInput> {
   const area =
     args.area ??
     (await input({
-      message: "What area do you want to search?",
+      message: "What city/metro/area do you want to search?",
       default: "Miami, FL",
       required: true,
     }));
+
+  const state =
+    args.state ??
+    (isNonInteractive
+      ? undefined
+      : await input({
+          message: "State filter? Leave blank if the area already includes it.",
+          default: "",
+        }));
+
+  const address =
+    args.address ??
+    (isNonInteractive
+      ? undefined
+      : await input({
+          message: "Address for radius search? Leave blank to search the area/state.",
+          default: "",
+        }));
+
+  const radiusMiles =
+    args.radiusMiles ??
+    (address
+      ? await number({
+          message: "Radius in miles from that address?",
+          default: 25,
+          min: 1,
+          max: 250,
+        })
+      : undefined);
 
   const targetCount =
     args.targetCount ??
@@ -84,6 +123,17 @@ async function promptForMissing(args: CliArgs): Promise<ScraperInput> {
       min: 0,
     }));
 
+  const minRating =
+    args.minRating ??
+    (isNonInteractive
+      ? undefined
+      : await number({
+          message: "Minimum rating? Leave blank for no API rating filter.",
+          default: 4,
+          min: 0,
+          max: 5,
+        }));
+
   const fallback =
     args.fallback ??
     (await confirm({
@@ -96,10 +146,7 @@ async function promptForMissing(args: CliArgs): Promise<ScraperInput> {
     (await checkbox<SourceName>({
       message: "Which sources should be used?",
       choices: [
-        { name: "Google Search", value: "google-search", checked: true },
-        { name: "Yelp public pages", value: "yelp", checked: true },
-        { name: "Google Maps fallback", value: "google-maps", checked: true },
-        { name: "Google Places API discovery", value: "google-places-api", checked: false },
+        { name: "Google Places API discovery", value: "google-places-api", checked: true },
       ],
       required: true,
     }));
@@ -115,8 +162,8 @@ async function promptForMissing(args: CliArgs): Promise<ScraperInput> {
   const apiEnrichment =
     args.apiEnrichment ??
     (await confirm({
-      message: "Use Google Places API enrichment for reviews/ratings if an API key is available?",
-      default: true,
+      message: "Run a secondary Google Places enrichment pass? Discovery already uses Places API data.",
+      default: false,
     }));
 
   const companySummaries =
@@ -145,14 +192,21 @@ async function promptForMissing(args: CliArgs): Promise<ScraperInput> {
   return validateInput({
     service,
     area,
+    state: state || undefined,
+    address: address || undefined,
+    radiusMiles,
     targetCount,
     minReviews,
+    minRating,
     fallback,
     sources: sources.length > 0 ? sources : defaultSources,
     outputDir,
     headless: args.headless ?? true,
     apiEnrichment,
     companySummaries,
+    includeServiceAreaBusinesses: args.includeServiceAreaBusinesses ?? true,
+    openNow: args.openNow ?? false,
+    rankPreference: args.rankPreference ?? "RELEVANCE",
     maxPagesPerSource: args.maxPagesPerSource ?? 3,
     delayMs: args.delayMs ?? 1500,
   });
@@ -167,6 +221,7 @@ async function main(): Promise<void> {
   console.log(`Area: ${config.area}`);
   console.log(`Target: ${config.targetCount}`);
   console.log(`Minimum reviews: ${config.minReviews ?? 0}`);
+  console.log(`Minimum rating: ${config.minRating ?? "none"}`);
   console.log(`Sources: ${config.sources.join(", ")}\n`);
   console.log(`Google Places enrichment: ${config.apiEnrichment ? "enabled" : "disabled"}\n`);
   console.log(`Company summaries: ${config.companySummaries ? "enabled" : "disabled"}\n`);

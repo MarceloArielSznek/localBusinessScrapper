@@ -1,7 +1,7 @@
 import { chromium } from "playwright";
 import type { Collector, CollectorContext, CompanyCandidate } from "../types.js";
 import { extractPhones, parseRating, parseReviewCount } from "../core/extractors.js";
-import { cleanTitle, politeDelay, safeGoto } from "./helpers.js";
+import { cleanTitle, politeDelay, safeGoto, searchLocation } from "./helpers.js";
 
 export class YelpCollector implements Collector {
   readonly name = "yelp" as const;
@@ -10,13 +10,14 @@ export class YelpCollector implements Collector {
     const browser = await chromium.launch({ headless: context.headless });
     const page = await browser.newPage();
     const candidates: CompanyCandidate[] = [];
+    const location = searchLocation(context);
 
     try {
       for (let pageIndex = 0; pageIndex < context.maxPages; pageIndex += 1) {
         const start = pageIndex * 10;
         const url = `https://www.yelp.com/search?find_desc=${encodeURIComponent(
           context.service,
-        )}&find_loc=${encodeURIComponent(context.area)}&start=${start}`;
+        )}&find_loc=${encodeURIComponent(location)}&start=${start}`;
 
         if (!(await safeGoto(page, url))) {
           continue;
