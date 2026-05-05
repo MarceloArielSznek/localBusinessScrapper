@@ -1,15 +1,18 @@
-import { useCallback, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useMemo, useState, type ElementType, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
+  BriefcaseBusiness,
   Building2,
   CheckCircle2,
+  ChevronDown,
   CircleAlert,
   Database,
   Download,
   FileSpreadsheet,
   LoaderCircle,
   Mail,
+  MapPin,
   Pencil,
   Play,
   Plus,
@@ -17,7 +20,6 @@ import {
   Sparkles,
   Star,
   Trash2,
-  X,
   UserRound,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -40,9 +42,23 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import {
   Table,
@@ -52,6 +68,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ConfigDrawer } from '@/components/config-drawer'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
@@ -63,6 +80,8 @@ import {
   getDbPeople,
   getDbRuns,
   getDbStatus,
+  getSearchCampaignItems,
+  getSearchCampaigns,
   getJobs,
   getCrmOptions,
   getGenericExportColumns,
@@ -86,8 +105,10 @@ import {
   updateCrmRecord,
   updateCrmRecordStatus,
   previewGenericExport,
-  startScrape,
+  startSearchCampaign,
+  startApolloPeopleSearch,
   startSelectedEnrichment,
+  revealApolloEmail,
   clearDbSearches,
   downloadGenericExport,
 } from './api'
@@ -95,9 +116,13 @@ import type {
   ApiJob,
   CompanyLead,
   ContactDiscoveryConfig,
+  CrmDashboard,
   CrmLeadInput,
   EnrichmentTask,
-  ScrapeRequest,
+  SearchCampaign,
+  SearchCampaignGroup,
+  SearchCampaignItem,
+  SearchCampaignRequest,
 } from './types'
 
 type LeadFilters = {
@@ -123,6 +148,7 @@ type PeopleFilters = {
   status: string
   source: string
   email: string
+  category: string
 }
 
 type CrudField = {
@@ -139,9 +165,10 @@ const defaultPeopleFilters: PeopleFilters = {
   status: 'all',
   source: 'all',
   email: 'all',
+  category: 'all',
 }
 
-const prospectStatuses = ['new', 'enriching', 'qualified', 'ready_to_contact', 'contacted', 'no_response', 'disqualified', 'converted_to_lead']
+const prospectStatuses = ['new', 'contacted', 'disqualified', 'converted_to_lead']
 const crmLeadStatuses = ['new', 'attempted_contact', 'connected', 'interested', 'demo_requested', 'unqualified', 'nurture', 'converted_to_opportunity']
 const opportunityStages = ['qualified', 'demo_booked', 'demo_completed', 'proposal_sent', 'negotiation', 'won', 'lost', 'nurture']
 const demoStatuses = ['scheduled', 'completed', 'no_show', 'cancelled']
@@ -155,6 +182,11 @@ const statusOptions = (values: string[], includeAll = false): [string, string][]
 
 function titleize(value: string) {
   return value.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function simplifiedProspectStatus(value: unknown) {
+  const status = String(value ?? 'new')
+  return prospectStatuses.includes(status) ? status : 'new'
 }
 
 const companyCrudFields: CrudField[] = [
@@ -262,7 +294,7 @@ function useCrmOptionConfig() {
   const crudFields = useMemo(
     () => ({
       prospect: [
-        { key: 'status', label: 'Status', type: 'select', options: optionFor('prospect_status', prospectStatuses) },
+        { key: 'status', label: 'Status', type: 'select', options: statusOptions(prospectStatuses) },
         { key: 'fit_score', label: 'Score', type: 'number' },
         { key: 'contact_status', label: 'Contact status', type: 'select', options: optionFor('outreach_status', ['new', 'ready_for_outreach', 'needs_email', 'contacted', 'do_not_contact']) },
         { key: 'service_query', label: 'Service query' },
@@ -326,476 +358,706 @@ function useCrmOptionConfig() {
 const defaultContactConfig: ContactDiscoveryConfig = {
   strategy: 'hybrid-quality',
   apolloEnabled: true,
+  allowEmailReveal: true,
+  maxEmailRevealsPerCompany: 1,
+  allowWebsiteNameLookup: true,
+  maxWebsiteNameLookups: 3,
   genericFallbackEnabled: true,
   allowInferredEmails: true,
   maxContactsPerCompany: 3,
 }
 
 const pageSizeOptions = [25, 50, 100, 250]
+const simpleSearcherMaxPages = 20
+const serviceCategories = [
+  {
+    name: 'Home exterior',
+    description: 'Roofing, solar, paint, windows, gutters, and exterior contractors.',
+    items: ['Roofing', 'Solar', 'Exterior painting', 'Window replacement', 'Gutter installation', 'Siding contractor'],
+  },
+  {
+    name: 'Mechanical trades',
+    description: 'High-value maintenance and replacement service businesses.',
+    items: ['HVAC', 'Plumbing', 'Electrical contractor', 'Insulation', 'Water heater repair', 'Septic service'],
+  },
+  {
+    name: 'Property services',
+    description: 'Recurring services for homes, rentals, and commercial properties.',
+    items: ['Landscaping', 'Pool cleaning', 'Pest control', 'Tree service', 'Pressure washing', 'Junk removal'],
+  },
+  {
+    name: 'Emergency repair',
+    description: 'Fast-response businesses that usually rely on phone and lead flow.',
+    items: ['Garage door repair', 'Locksmith', 'Restoration company', 'Appliance repair', 'Mold remediation', 'Drain cleaning'],
+  },
+]
+
+const stateCityPresets = [
+  {
+    state: 'FL',
+    name: 'Florida',
+    groups: [
+      { name: 'South Florida', items: ['Miami, FL', 'Fort Lauderdale, FL', 'West Palm Beach, FL', 'Boca Raton, FL', 'Hollywood, FL'] },
+      { name: 'Central Florida', items: ['Orlando, FL', 'Kissimmee, FL', 'Lakeland, FL', 'Winter Park, FL', 'Sanford, FL'] },
+      { name: 'Tampa Bay', items: ['Tampa, FL', 'St. Petersburg, FL', 'Clearwater, FL', 'Sarasota, FL', 'Bradenton, FL'] },
+      { name: 'North Florida', items: ['Jacksonville, FL', 'Tallahassee, FL', 'Gainesville, FL', 'St. Augustine, FL', 'Ocala, FL'] },
+    ],
+  },
+  {
+    state: 'TX',
+    name: 'Texas',
+    groups: [
+      { name: 'North Texas', items: ['Dallas, TX', 'Fort Worth, TX', 'Plano, TX', 'Frisco, TX', 'Arlington, TX'] },
+      { name: 'Gulf Coast', items: ['Houston, TX', 'The Woodlands, TX', 'Sugar Land, TX', 'Pearland, TX', 'Katy, TX'] },
+      { name: 'Central Texas', items: ['Austin, TX', 'Round Rock, TX', 'Georgetown, TX', 'San Marcos, TX', 'Killeen, TX'] },
+      { name: 'South Texas', items: ['San Antonio, TX', 'New Braunfels, TX', 'Corpus Christi, TX', 'McAllen, TX', 'Laredo, TX'] },
+    ],
+  },
+  {
+    state: 'CA',
+    name: 'California',
+    groups: [
+      { name: 'Southern California', items: ['Los Angeles, CA', 'Long Beach, CA', 'Anaheim, CA', 'Irvine, CA', 'Santa Ana, CA'] },
+      { name: 'San Diego County', items: ['San Diego, CA', 'Chula Vista, CA', 'Oceanside, CA', 'Escondido, CA', 'Carlsbad, CA'] },
+      { name: 'Bay Area', items: ['San Francisco, CA', 'San Jose, CA', 'Oakland, CA', 'Fremont, CA', 'Palo Alto, CA'] },
+      { name: 'Central Valley', items: ['Fresno, CA', 'Bakersfield, CA', 'Modesto, CA', 'Stockton, CA', 'Sacramento, CA'] },
+    ],
+  },
+  {
+    state: 'NY',
+    name: 'New York',
+    groups: [
+      { name: 'NYC Metro', items: ['New York, NY', 'Brooklyn, NY', 'Queens, NY', 'Bronx, NY', 'Staten Island, NY'] },
+      { name: 'Long Island', items: ['Hempstead, NY', 'Huntington, NY', 'Islip, NY', 'Oyster Bay, NY', 'Babylon, NY'] },
+      { name: 'Hudson Valley', items: ['Yonkers, NY', 'White Plains, NY', 'New Rochelle, NY', 'Poughkeepsie, NY', 'Newburgh, NY'] },
+      { name: 'Upstate', items: ['Buffalo, NY', 'Rochester, NY', 'Syracuse, NY', 'Albany, NY', 'Schenectady, NY'] },
+    ],
+  },
+]
 
 export function SearcherPage() {
   const queryClient = useQueryClient()
-  const [serviceDraft, setServiceDraft] = useState('')
-  const [areaDraft, setAreaDraft] = useState('')
+  const [selectedCampaignId, setSelectedCampaignId] = useState('')
+  const [selectedState, setSelectedState] = useState('FL')
   const [form, setForm] = useState({
-    services: ['Roofing', 'Insulation', 'HVAC'],
-    areas: ['Miami, FL', 'Orlando, FL'],
-    useRadiusSearch: false,
-    address: '',
-    radiusMiles: 25,
-    targetCount: 25,
-    minReviews: 100,
-    minRating: 4,
-    maxPagesPerSource: 3,
-    includeServiceAreaBusinesses: true,
-    openNow: false,
-    rankPreference: 'RELEVANCE' as 'RELEVANCE' | 'DISTANCE',
-    autoEnrich: true,
+    name: 'Florida contractor prospecting',
+    servicesText: ['Roofing', 'Insulation', 'HVAC'].join('\n'),
+    areasText: ['Miami, FL', 'Orlando, FL'].join('\n'),
+    targetPerSearch: 10000,
+  })
+  const services = useMemo(() => parseBulkLines(form.servicesText), [form.servicesText])
+  const areas = useMemo(() => parseBulkLines(form.areasText), [form.areasText])
+  const selectedStatePreset = stateCityPresets.find((preset) => preset.state === selectedState) ?? stateCityPresets[0]
+  const serviceGroups = useMemo<SearchCampaignGroup[]>(
+    () => serviceCategories
+      .map((category) => ({
+        name: category.name,
+        items: category.items.filter((item) => services.includes(item)),
+      }))
+      .filter((group) => group.items.length > 0),
+    [services],
+  )
+  const areaGroups = useMemo<SearchCampaignGroup[]>(
+    () => stateCityPresets
+      .flatMap((preset) =>
+        preset.groups.map((group) => ({
+          name: `${preset.name} / ${group.name}`,
+          state: preset.state,
+          items: group.items.filter((item) => areas.includes(item)),
+        }))
+      )
+      .filter((group) => group.items.length > 0),
+    [areas],
+  )
+  const totalSearches = services.length * areas.length
+  const targetPerSearch = Math.max(1, Math.round(form.targetPerSearch || 1))
+  const totalTarget = targetPerSearch * totalSearches
+  const canStart = services.length > 0 && areas.length > 0 && targetPerSearch > 0
+  const campaignsQuery = useQuery({
+    queryKey: ['search-campaigns'],
+    queryFn: getSearchCampaigns,
+    refetchInterval: 5000,
+  })
+  const selectedCampaign = campaignsQuery.data?.campaigns.find((campaign) => campaign.id === selectedCampaignId)
+  const campaignItemsQuery = useQuery({
+    queryKey: ['search-campaign-items', selectedCampaignId],
+    queryFn: () => getSearchCampaignItems(selectedCampaignId),
+    enabled: Boolean(selectedCampaignId),
+    refetchInterval: selectedCampaign?.status === 'running' ? 3000 : false,
+  })
+  const jobsQuery = useQuery({
+    queryKey: ['jobs'],
+    queryFn: getJobs,
+    refetchInterval: 1500,
   })
 
-  const scrapeMutation = useMutation({
-    mutationFn: startScrape,
-    onSuccess: ({ job }) => {
-      toast.success('Scrape started', { description: job.message })
+  const campaignMutation = useMutation({
+    mutationFn: startSearchCampaign,
+    onSuccess: ({ campaign, job }) => {
+      toast.success('Campaign started', { description: job.message })
+      setSelectedCampaignId(campaign.id)
+      void queryClient.invalidateQueries({ queryKey: ['search-campaigns'] })
       void queryClient.invalidateQueries({ queryKey: ['db-runs'] })
       void queryClient.invalidateQueries({ queryKey: ['db-companies'] })
       void queryClient.invalidateQueries({ queryKey: ['jobs'] })
     },
     onError: (error) =>
-      toast.error('Could not start scraper', {
+      toast.error('Could not start campaign', {
         description: error instanceof Error ? error.message : String(error),
       }),
   })
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const services = form.services
-    const areas = form.areas
-    const payload: ScrapeRequest = {
+    const payload: SearchCampaignRequest = {
+      name: form.name,
       service: services[0] ?? '',
       area: areas[0] ?? '',
       services,
       areas,
-      address: form.useRadiusSearch && form.address ? form.address : undefined,
-      radiusMiles: form.useRadiusSearch && form.address ? form.radiusMiles : undefined,
+      serviceGroups,
+      areaGroups,
       fallback: true,
       sources: ['google-places-api'],
       outputDir: 'output/db-cache',
       apiEnrichment: false,
       companySummaries: false,
-      autoEnrich: form.autoEnrich,
-      includeServiceAreaBusinesses: form.includeServiceAreaBusinesses,
-      openNow: form.openNow,
-      rankPreference: form.rankPreference,
+      autoEnrich: false,
+      includeServiceAreaBusinesses: true,
+      openNow: false,
+      rankPreference: 'RELEVANCE',
       headless: true,
-      targetCount: form.targetCount,
-      minReviews: form.minReviews,
-      minRating: form.minRating,
-      maxPagesPerSource: form.maxPagesPerSource,
+      totalTarget,
+      targetPerSearch,
+      minReviews: 0,
+      maxPagesPerSource: simpleSearcherMaxPages,
       delayMs: 1200,
     }
-    scrapeMutation.mutate(payload)
+    campaignMutation.mutate(payload)
   }
 
   return (
     <PageShell
       title='Searcher'
-      description='Search Google Maps places by service and area, then save every result directly to Postgres.'
+      description='Build big Google Maps prospecting campaigns without dealing with scraper settings.'
     >
-      <div>
-        <Card>
-          <CardHeader>
-            <CardTitle>Google Maps search</CardTitle>
-            <CardDescription>
-              Add multiple services and areas. The app runs every service/area combination as a DB-backed job.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form className='space-y-4' onSubmit={submit}>
-              <SearchSummary form={form} />
-
-              <Tabs defaultValue='search' className='gap-4'>
-                <TabsList className='grid w-full grid-cols-3'>
-                  <TabsTrigger value='search'>Search</TabsTrigger>
-                  <TabsTrigger value='options'>Options</TabsTrigger>
-                  <TabsTrigger value='plan'>Plan</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value='search' className='space-y-4'>
-                  <div className='grid gap-3 xl:grid-cols-2'>
-                    <Field label='Services / industries'>
-                      <BlockPicker
-                        placeholder='Add service, e.g. Plumbing'
-                        draft={serviceDraft}
-                        items={form.services}
-                        emptyText='No services added yet.'
-                        onDraftChange={setServiceDraft}
-                        onAdd={(value) => {
-                          setForm({ ...form, services: addUniqueItem(form.services, value) })
-                          setServiceDraft('')
-                        }}
-                        onRemove={(value) =>
-                          setForm({
-                            ...form,
-                            services: form.services.filter((item) => item !== value),
-                          })
-                        }
-                      />
-                    </Field>
-                    <Field label='Areas / cities / states'>
-                      <BlockPicker
-                        placeholder='Add area, e.g. Tampa, FL'
-                        draft={areaDraft}
-                        items={form.areas}
-                        emptyText='No areas added yet.'
-                        onDraftChange={setAreaDraft}
-                        onAdd={(value) => {
-                          setForm({ ...form, areas: addUniqueItem(form.areas, value) })
-                          setAreaDraft('')
-                        }}
-                        onRemove={(value) =>
-                          setForm({
-                            ...form,
-                            areas: form.areas.filter((item) => item !== value),
-                          })
-                        }
-                      />
-                    </Field>
-                  </div>
-
-                  <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
-                    <Field label='Target companies'>
-                      <Input
-                        type='number'
-                        min={1}
-                        value={form.targetCount}
-                        onChange={(event) =>
-                          setForm({ ...form, targetCount: Number(event.target.value) })
-                        }
-                      />
-                    </Field>
-                    <Field label='Minimum reviews'>
-                      <Input
-                        type='number'
-                        min={0}
-                        value={form.minReviews}
-                        onChange={(event) =>
-                          setForm({ ...form, minReviews: Number(event.target.value) })
-                        }
-                      />
-                    </Field>
-                    <Field label='Minimum rating'>
-                      <Input
-                        type='number'
-                        min={0}
-                        max={5}
-                        step={0.1}
-                        value={form.minRating}
-                        onChange={(event) =>
-                          setForm({ ...form, minRating: Number(event.target.value) })
-                        }
-                      />
-                    </Field>
-                    <Field label='Max Google pages'>
-                      <Input
-                        type='number'
-                        min={1}
-                        max={10}
-                        value={form.maxPagesPerSource}
-                        onChange={(event) =>
-                          setForm({ ...form, maxPagesPerSource: Number(event.target.value) })
-                        }
-                      />
-                    </Field>
-                  </div>
-                </TabsContent>
-
-                <TabsContent value='options' className='space-y-4'>
-                  <div className='grid gap-3 xl:grid-cols-3'>
-                    <ToggleCard
-                      checked={form.includeServiceAreaBusinesses}
-                      title='Include service-area businesses'
-                      description='Important for contractors without storefronts.'
-                      onCheckedChange={(checked) =>
-                        setForm({ ...form, includeServiceAreaBusinesses: checked })
-                      }
-                    />
-                    <ToggleCard
-                      checked={form.openNow}
-                      title='Open now only'
-                      description='Usually off so good companies are not filtered out.'
-                      onCheckedChange={(checked) =>
-                        setForm({ ...form, openNow: checked })
-                      }
-                    />
-                    <ToggleCard
-                      checked={form.autoEnrich}
-                      title='Run AI enrichment'
-                      description='Crawl websites, summarize, find contacts, and score.'
-                      onCheckedChange={(checked) =>
-                        setForm({ ...form, autoEnrich: checked })
-                      }
-                    />
-                  </div>
-
-                  <div className='grid gap-3 xl:grid-cols-[1fr_2fr]'>
-                    <Field label='Rank preference'>
-                      <select
-                        value={form.rankPreference}
-                        onChange={(event) =>
-                          setForm({ ...form, rankPreference: event.target.value as 'RELEVANCE' | 'DISTANCE' })
-                        }
-                        className='h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none'
-                      >
-                        <option value='RELEVANCE'>Relevance</option>
-                        <option value='DISTANCE'>Distance</option>
-                      </select>
-                    </Field>
-                    <ToggleCard
-                      checked={form.useRadiusSearch}
-                      title='Use address + radius search'
-                      description='Optional. Bias Google Maps results around a specific address.'
-                      onCheckedChange={(checked) =>
-                        setForm({ ...form, useRadiusSearch: checked })
-                      }
-                    />
-                  </div>
-
-                  {form.useRadiusSearch ? (
-                    <div className='grid gap-3 rounded-lg border bg-muted/20 p-3 md:grid-cols-[1fr_180px]'>
-                      <Field label='Address for radius'>
-                        <Input
-                          value={form.address}
-                          placeholder='100 Biscayne Blvd, Miami, FL'
-                          onChange={(event) =>
-                            setForm({ ...form, address: event.target.value })
-                          }
-                        />
-                      </Field>
-                      <Field label='Radius miles'>
-                        <Input
-                          type='number'
-                          min={1}
-                          max={250}
-                          value={form.radiusMiles}
-                          onChange={(event) =>
-                            setForm({ ...form, radiusMiles: Number(event.target.value) })
-                          }
-                        />
-                      </Field>
-                    </div>
-                  ) : null}
-                </TabsContent>
-
-                <TabsContent value='plan'>
-                  <SearchPreview form={form} />
-                </TabsContent>
-              </Tabs>
-
-              <div className='flex flex-col gap-2 border-t pt-4 sm:flex-row sm:items-center sm:justify-between'>
-                <div className='text-sm text-muted-foreground'>
-                  Results save to Postgres. Detailed progress appears in Activity.
+      <form className='grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]' onSubmit={submit}>
+        <div className='space-y-4'>
+          <Card className='overflow-hidden border-primary/20 shadow-sm'>
+            <CardHeader className='border-b bg-muted/20 px-4 py-3'>
+              <div className='flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between'>
+                <div>
+                  <CardTitle className='text-lg'>Campaign builder</CardTitle>
+                  <CardDescription>Pick service types and areas. Searcher runs every service x area combination.</CardDescription>
                 </div>
-                <Button
-                  className='sm:min-w-48'
-                  type='submit'
-                  disabled={scrapeMutation.isPending || form.services.length === 0 || form.areas.length === 0}
-                >
-                  <Play />
-                  Start search
+                <div className='flex flex-wrap gap-2'>
+                  <Badge variant='outline' className='gap-1.5'>
+                    <MapPin className='size-3.5' />
+                    Google Places
+                  </Badge>
+                  <Badge variant='secondary' className='gap-1.5'>
+                    <CheckCircle2 className='size-3.5' />
+                    Basic data
+                  </Badge>
+                  <Badge variant='secondary'>No enrichment</Badge>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className='space-y-4 p-4'>
+              <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_300px]'>
+                <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_170px] md:grid-cols-1'>
+                  <Field label='Campaign name'>
+                    <Input
+                      className='h-9'
+                      value={form.name}
+                      onChange={(event) => setForm({ ...form, name: event.target.value })}
+                      placeholder='Florida contractor list'
+                    />
+                  </Field>
+                  <Field label='Companies per search'>
+                    <Input
+                      className='h-9'
+                      type='number'
+                      min={1}
+                      max={100000}
+                      value={form.targetPerSearch}
+                      onChange={(event) => setForm({ ...form, targetPerSearch: Number(event.target.value) })}
+                    />
+                  </Field>
+                </div>
+                <div className='grid grid-cols-2 gap-2 rounded-lg border bg-background p-2'>
+                  <SummaryStat label='Services' value={services.length} />
+                  <SummaryStat label='Areas' value={areas.length} />
+                  <SummaryStat label='Searches' value={totalSearches} />
+                  <SummaryStat label='Possible' value={totalTarget} />
+                </div>
+              </div>
+
+              <div className='grid gap-4 md:grid-cols-2'>
+                <ServiceSelectorCard
+                  selectedServices={services}
+                  servicesText={form.servicesText}
+                  onChange={(servicesText) => setForm({ ...form, servicesText })}
+                />
+                <AreaSelectorCard
+                  selectedAreas={areas}
+                  areasText={form.areasText}
+                  selectedState={selectedState}
+                  selectedStatePreset={selectedStatePreset}
+                  onStateChange={setSelectedState}
+                  onChange={(areasText) => setForm({ ...form, areasText })}
+                />
+              </div>
+
+              <div className='flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between'>
+                <div className='text-sm text-muted-foreground'>
+                  {canStart
+                    ? `${formatNumber(totalSearches)} searches. Example: ${services[0] || 'Roofing'} in ${areas[0] || 'Miami, FL'} can save up to ${formatNumber(targetPerSearch)} companies.`
+                    : 'Add at least one service and one area to start.'}
+                </div>
+                <Button type='submit' disabled={campaignMutation.isPending || !canStart} className='sm:min-w-56'>
+                  {campaignMutation.isPending ? <LoaderCircle className='animate-spin' /> : <Play />}
+                  {campaignMutation.isPending ? 'Starting...' : 'Start search campaign'}
                 </Button>
               </div>
-            </form>
-          </CardContent>
-        </Card>
-      </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className='space-y-4 xl:sticky xl:top-4 xl:self-start'>
+          <RecentCampaigns
+            campaigns={campaignsQuery.data?.campaigns ?? []}
+            selectedCampaignId={selectedCampaignId}
+            onSelect={setSelectedCampaignId}
+          />
+          <JobMonitor jobs={jobsQuery.data?.jobs ?? []} compact />
+        </div>
+      </form>
+
+      {selectedCampaignId ? (
+        <CampaignItemsCard
+          campaign={selectedCampaign}
+          items={campaignItemsQuery.data?.items ?? []}
+        />
+      ) : null}
     </PageShell>
   )
 }
 
-function SearchSummary({
-  form,
-}: {
-  form: {
-    services: string[]
-    areas: string[]
-    targetCount: number
-    minReviews: number
-    minRating: number
-    autoEnrich: boolean
-  }
-}) {
-  const totalSearches = form.services.length * form.areas.length
+function parseBulkLines(value: string): string[] {
+  return [...new Set(value.split(/\n/).map((item) => item.trim()).filter(Boolean))]
+}
 
+function toggleListItems(currentValue: string, items: string[]) {
+  const currentItems = parseBulkLines(currentValue)
+  const itemSet = new Set(currentItems)
+  const allSelected = items.every((item) => itemSet.has(item))
+  const nextItems = allSelected
+    ? currentItems.filter((item) => !items.includes(item))
+    : [...currentItems, ...items.filter((item) => !itemSet.has(item))]
+  return nextItems.join('\n')
+}
+
+function toggleListItem(currentValue: string, item: string) {
+  const currentItems = parseBulkLines(currentValue)
+  return currentItems.includes(item)
+    ? currentItems.filter((currentItem) => currentItem !== item).join('\n')
+    : [...currentItems, item].join('\n')
+}
+
+function addListItem(currentValue: string, item: string) {
+  const trimmed = item.trim()
+  if (!trimmed) return currentValue
+  const currentItems = parseBulkLines(currentValue)
+  return currentItems.includes(trimmed) ? currentItems.join('\n') : [...currentItems, trimmed].join('\n')
+}
+
+function ServiceSelectorCard({
+  selectedServices,
+  servicesText,
+  onChange,
+}: {
+  selectedServices: string[]
+  servicesText: string
+  onChange: (value: string) => void
+}) {
   return (
-    <div className='grid gap-3 rounded-lg border bg-muted/20 p-3 md:grid-cols-4'>
-      <Metric label='Searches' value={totalSearches} />
-      <Metric label='Services' value={form.services.length} />
-      <Metric label='Areas' value={form.areas.length} />
-      <div className='rounded-lg border bg-background p-3'>
-        <div className='text-sm font-medium'>{form.minReviews}+ reviews, {form.minRating}+ stars</div>
-        <div className='text-xs text-muted-foreground'>
-          {form.targetCount} target leads per search. {form.autoEnrich ? 'AI enrichment on.' : 'AI enrichment off.'}
-        </div>
-      </div>
-    </div>
+    <section className='rounded-lg border bg-background p-3'>
+      <SelectorHeader
+        icon={Building2}
+        eyebrow='Target'
+        title='Service types'
+        description='Choose service-company types.'
+        count={selectedServices.length}
+      />
+      <GroupedMultiSelect
+        triggerLabel='Select service types'
+        emptyLabel='No service types selected'
+        selectedItems={selectedServices}
+        groups={serviceCategories}
+        onToggleItem={(item) => onChange(toggleListItem(servicesText, item))}
+        onToggleGroup={(items) => onChange(toggleListItems(servicesText, items))}
+      />
+      <ManualAddInput
+        label='Add custom service company'
+        placeholder='e.g. Kitchen remodeling'
+        onAdd={(item) => onChange(addListItem(servicesText, item))}
+      />
+      <SelectedPills
+        items={selectedServices}
+        emptyMessage='Pick at least one service type from the dropdown.'
+        onRemove={(item) => onChange(toggleListItem(servicesText, item))}
+      />
+    </section>
   )
 }
 
-function SearchPreview({
-  form,
+function AreaSelectorCard({
+  selectedAreas,
+  areasText,
+  selectedState,
+  selectedStatePreset,
+  onStateChange,
+  onChange,
 }: {
-  form: {
-    services: string[]
-    areas: string[]
-    targetCount: number
-    minReviews: number
-    minRating: number
-    maxPagesPerSource: number
-    autoEnrich: boolean
-  }
+  selectedAreas: string[]
+  areasText: string
+  selectedState: string
+  selectedStatePreset: (typeof stateCityPresets)[number]
+  onStateChange: (state: string) => void
+  onChange: (value: string) => void
 }) {
-  const services = form.services
-  const areas = form.areas
-  const totalSearches = services.length * areas.length
-  const estimatedRequests = totalSearches * form.maxPagesPerSource
-
   return (
-    <div className='rounded-lg border bg-muted/20 p-3'>
-      <div className='mb-3'>
-        <div className='font-medium'>Search plan</div>
-        <p className='text-sm text-muted-foreground'>Progress appears only in Activity.</p>
+    <section className='rounded-lg border bg-background p-3'>
+      <SelectorHeader
+        icon={MapPin}
+        eyebrow='Markets'
+        title='Areas'
+        description='Choose city groups or individual cities.'
+        count={selectedAreas.length}
+      />
+      <div className='mb-2'>
+        <Select value={selectedState} onValueChange={onStateChange}>
+          <SelectTrigger className='h-9 w-full'>
+            <SelectValue placeholder='Choose a state' />
+          </SelectTrigger>
+          <SelectContent>
+            {stateCityPresets.map((preset) => (
+              <SelectItem key={preset.state} value={preset.state}>
+                {preset.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
-      <div className='space-y-3'>
-        <div className='grid gap-3 sm:grid-cols-2'>
-          <Metric label='Services' value={services.length} />
-          <Metric label='Areas' value={areas.length} />
-          <Metric label='Search jobs' value={totalSearches} />
-          <Metric label='Max API pages' value={estimatedRequests} />
-        </div>
-        <div className='rounded-lg border bg-muted/20 p-3 text-sm'>
-          <div className='font-medium'>Quality filters</div>
-          <p className='mt-1 text-muted-foreground'>
-            Prefer {form.targetCount} companies per search with at least {form.minReviews} reviews
-            and {form.minRating}+ stars. Fallback fills the remaining slots with best available
-            Google Maps results.
-          </p>
-        </div>
-        <div className='rounded-lg border bg-muted/20 p-3 text-sm'>
-          <div className='font-medium'>After search</div>
-          <p className='mt-1 text-muted-foreground'>
-            {form.autoEnrich
-              ? 'AI enrichment will start automatically for each result set.'
-              : 'AI enrichment is disabled for this batch.'}
-          </p>
-        </div>
-      </div>
-    </div>
+      <GroupedMultiSelect
+        triggerLabel='Select areas'
+        emptyLabel='No areas selected'
+        selectedItems={selectedAreas}
+        groups={selectedStatePreset.groups}
+        onToggleItem={(item) => onChange(toggleListItem(areasText, item))}
+        onToggleGroup={(items) => onChange(toggleListItems(areasText, items))}
+      />
+      <ManualAddInput
+        label='Add custom area'
+        placeholder='e.g. Naples, FL'
+        onAdd={(item) => onChange(addListItem(areasText, item))}
+      />
+      <SelectedPills
+        items={selectedAreas}
+        emptyMessage='Pick at least one area from the dropdown.'
+        onRemove={(item) => onChange(toggleListItem(areasText, item))}
+      />
+    </section>
   )
 }
 
-function ToggleCard({
-  checked,
+function SelectorHeader({
+  icon: Icon,
+  eyebrow,
   title,
   description,
-  onCheckedChange,
+  count,
 }: {
-  checked: boolean
+  icon: ElementType
+  eyebrow: string
   title: string
   description: string
-  onCheckedChange: (checked: boolean) => void
+  count: number
 }) {
   return (
-    <label className='flex items-start gap-3 rounded-lg border bg-muted/20 p-3 text-sm'>
-      <Checkbox
-        checked={checked}
-        onCheckedChange={(next) => onCheckedChange(Boolean(next))}
-      />
-      <span>
-        <span className='block font-medium'>{title}</span>
-        <span className='text-muted-foreground'>{description}</span>
-      </span>
-    </label>
+    <div className='mb-3 flex items-start justify-between gap-3'>
+      <div className='flex min-w-0 gap-2'>
+        <div className='flex size-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary'>
+          <Icon className='size-4' />
+        </div>
+        <div className='min-w-0'>
+          <div className='text-[11px] font-medium uppercase text-muted-foreground'>{eyebrow}</div>
+          <h3 className='text-base font-semibold leading-tight'>{title}</h3>
+          <p className='truncate text-xs text-muted-foreground'>{description}</p>
+        </div>
+      </div>
+      <Badge variant={count > 0 ? 'secondary' : 'destructive'}>{count}</Badge>
+    </div>
   )
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function GroupedMultiSelect({
+  triggerLabel,
+  emptyLabel,
+  selectedItems,
+  groups,
+  onToggleItem,
+  onToggleGroup,
+}: {
+  triggerLabel: string
+  emptyLabel: string
+  selectedItems: string[]
+  groups: Array<{ name: string; description?: string; items: string[] }>
+  onToggleItem: (item: string) => void
+  onToggleGroup: (items: string[]) => void
+}) {
   return (
-    <div className='rounded-lg border p-3'>
-      <div className='text-2xl font-bold'>{value}</div>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button type='button' variant='outline' className='h-9 w-full justify-between'>
+          <span>{selectedItems.length > 0 ? `${selectedItems.length} selected` : triggerLabel}</span>
+          <ChevronDown className='size-4 opacity-60' />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent className='max-h-[420px] w-[--radix-dropdown-menu-trigger-width] overflow-y-auto'>
+        {groups.map((group) => {
+          const selectedCount = group.items.filter((item) => selectedItems.includes(item)).length
+          const groupChecked = selectedCount === group.items.length
+          return (
+            <div key={group.name}>
+              <DropdownMenuLabel className='flex items-center justify-between gap-3'>
+                <span>{group.name}</span>
+                <Button
+                  type='button'
+                  variant='ghost'
+                  size='sm'
+                  className='h-7 px-2 text-xs'
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    onToggleGroup(group.items)
+                  }}
+                >
+                  {groupChecked ? 'Remove group' : 'Add group'}
+                </Button>
+              </DropdownMenuLabel>
+              {group.description ? (
+                <div className='px-2 pb-1 text-xs text-muted-foreground'>{group.description}</div>
+              ) : null}
+              {group.items.map((item) => (
+                <DropdownMenuCheckboxItem
+                  key={item}
+                  checked={selectedItems.includes(item)}
+                  onCheckedChange={() => onToggleItem(item)}
+                  onSelect={(event) => event.preventDefault()}
+                >
+                  {item}
+                </DropdownMenuCheckboxItem>
+              ))}
+              <DropdownMenuSeparator />
+            </div>
+          )
+        })}
+      </DropdownMenuContent>
+      {selectedItems.length === 0 ? <p className='mt-3 text-sm text-destructive'>{emptyLabel}</p> : null}
+    </DropdownMenu>
+  )
+}
+
+function ManualAddInput({
+  label,
+  placeholder,
+  onAdd,
+}: {
+  label: string
+  placeholder: string
+  onAdd: (item: string) => void
+}) {
+  const [draft, setDraft] = useState('')
+
+  function addManualItem() {
+    onAdd(draft)
+    setDraft('')
+  }
+
+  function handleInputKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (draft.trim()) addManualItem()
+    }
+  }
+
+  return (
+    <div className='mt-3'>
+      <Label className='text-xs text-muted-foreground'>{label}</Label>
+      <div className='mt-1 flex gap-2'>
+        <Input
+          className='h-9'
+          value={draft}
+          placeholder={placeholder}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={handleInputKeyDown}
+        />
+        <Button type='button' variant='secondary' size='sm' disabled={!draft.trim()} onClick={addManualItem}>
+          <Plus className='size-4' />
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function SelectedPills({
+  items,
+  emptyMessage,
+  onRemove,
+}: {
+  items: string[]
+  emptyMessage: string
+  onRemove: (item: string) => void
+}) {
+  return (
+    <div className='mt-3 rounded-md border bg-muted/10 p-2'>
+      {items.length === 0 ? (
+        <p className='text-xs text-muted-foreground'>{emptyMessage}</p>
+      ) : (
+        <div className='flex max-h-28 flex-wrap gap-1.5 overflow-auto'>
+          {items.map((item) => (
+            <button
+              key={item}
+              type='button'
+              className='rounded-full border bg-background px-2.5 py-1 text-xs transition-colors hover:bg-muted'
+              onClick={() => onRemove(item)}
+            >
+              {item} x
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SummaryStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className='rounded-md border bg-muted/10 px-3 py-2'>
+      <div className='text-lg font-semibold leading-tight'>{formatNumber(value || 0)}</div>
       <div className='text-xs text-muted-foreground'>{label}</div>
     </div>
   )
 }
 
-function BlockPicker({
-  placeholder,
-  draft,
-  items,
-  emptyText,
-  onDraftChange,
-  onAdd,
-  onRemove,
+function RecentCampaigns({
+  campaigns,
+  selectedCampaignId,
+  onSelect,
 }: {
-  placeholder: string
-  draft: string
-  items: string[]
-  emptyText: string
-  onDraftChange: (value: string) => void
-  onAdd: (value: string) => void
-  onRemove: (value: string) => void
+  campaigns: SearchCampaign[]
+  selectedCampaignId: string
+  onSelect: (id: string) => void
 }) {
-  function submitDraft() {
-    const value = draft.trim()
-    if (value) {
-      onAdd(value)
-    }
-  }
-
   return (
-    <div className='space-y-3 rounded-lg border bg-muted/20 p-3'>
-      <div className='flex gap-2'>
-        <Input
-          value={draft}
-          placeholder={placeholder}
-          onChange={(event) => onDraftChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              submitDraft()
-            }
-          }}
-        />
-        <Button type='button' variant='secondary' onClick={submitDraft}>
-          <Plus className='size-4' />
-          Add
-        </Button>
-      </div>
-
-      <div className='flex min-h-20 flex-wrap content-start gap-2 rounded-md bg-background p-2'>
-        {items.length === 0 ? (
-          <span className='text-sm text-muted-foreground'>{emptyText}</span>
+    <Card>
+      <CardHeader>
+        <CardTitle>Recent campaigns</CardTitle>
+        <CardDescription>Persisted search campaigns and their progress.</CardDescription>
+      </CardHeader>
+      <CardContent className='space-y-3'>
+        {campaigns.length === 0 ? (
+          <EmptyDashboardState message='No campaigns yet.' />
         ) : (
-          items.map((item) => (
-            <span
-              key={item}
-              className='inline-flex items-center gap-2 rounded-full border bg-muted px-3 py-1 text-sm font-medium'
+          campaigns.map((campaign) => (
+            <button
+              key={campaign.id}
+              type='button'
+              className={`w-full rounded-lg border p-3 text-start transition-colors hover:bg-muted/40 ${selectedCampaignId === campaign.id ? 'border-primary bg-primary/5' : ''}`}
+              onClick={() => onSelect(campaign.id)}
             >
-              {item}
-              <button
-                type='button'
-                className='rounded-full text-muted-foreground transition-colors hover:text-foreground'
-                onClick={() => onRemove(item)}
-                aria-label={`Remove ${item}`}
-              >
-                <X className='size-3.5' />
-              </button>
-            </span>
+              <div className='flex items-center justify-between gap-3'>
+                <div className='font-medium'>{campaign.name}</div>
+                <Badge variant={campaign.status === 'failed' ? 'destructive' : 'secondary'}>{titleize(campaign.status)}</Badge>
+              </div>
+              <div className='mt-2 text-xs text-muted-foreground'>
+                {campaign.completed_searches}/{campaign.total_searches} searches • {formatNumber(campaign.unique_company_count)} unique companies
+              </div>
+              <div className='mt-2 h-2 overflow-hidden rounded-full bg-muted'>
+                <div className='h-full rounded-full bg-primary' style={{ width: `${campaignProgress(campaign)}%` }} />
+              </div>
+            </button>
           ))
         )}
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   )
+}
+
+function CampaignItemsCard({
+  campaign,
+  items,
+}: {
+  campaign?: SearchCampaign
+  items: SearchCampaignItem[]
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{campaign ? `${campaign.name} searches` : 'Campaign searches'}</CardTitle>
+        <CardDescription>
+          Search-level progress, saved companies, and failures.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {items.length === 0 ? (
+          <EmptyDashboardState message='No campaign items loaded yet.' />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Search</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Discovered</TableHead>
+                <TableHead>Saved</TableHead>
+                <TableHead>Error</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {items.map((item) => (
+                <TableRow key={item.id}>
+                  <TableCell className='whitespace-normal'>
+                    <div className='font-medium'>{item.service}</div>
+                    <div className='text-xs text-muted-foreground'>{item.area}</div>
+                    <div className='mt-1 flex flex-wrap gap-1'>
+                      {item.service_group ? <Badge variant='outline'>{item.service_group}</Badge> : null}
+                      {item.area_group ? <Badge variant='outline'>{item.area_group}</Badge> : null}
+                      {item.area_state ? <Badge variant='outline'>{item.area_state}</Badge> : null}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant={item.status === 'failed' ? 'destructive' : 'outline'}>{titleize(item.status)}</Badge>
+                  </TableCell>
+                  <TableCell>{formatNumber(item.discovered_count)}</TableCell>
+                  <TableCell>{formatNumber(item.saved_count)}</TableCell>
+                  <TableCell className='max-w-[320px] truncate text-sm text-muted-foreground'>
+                    {item.error_message ?? ''}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function campaignProgress(campaign: SearchCampaign) {
+  if (campaign.total_searches <= 0) return 0
+  return Math.round((campaign.completed_searches / campaign.total_searches) * 100)
 }
 
 export function ActivityPage() {
@@ -854,17 +1116,24 @@ function useRecordCrud(entity: string, queryKeys: string[]) {
 export function ProspectsPage() {
   const queryClient = useQueryClient()
   const prospectCrud = useRecordCrud('prospects', ['prospects', 'crm-dashboard'])
+  const companyCrud = useRecordCrud('companies', ['db-companies', 'prospects', 'crm-dashboard'])
+  const peopleCrud = useRecordCrud('people', ['db-people'])
   const { optionFor, crudFields } = useCrmOptionConfig()
-  const [filters, setFilters] = useState<LeadFilters>(defaultFilters)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [refreshSelected, setRefreshSelected] = useState(false)
-  const [contactConfig, setContactConfig] = useState<ContactDiscoveryConfig>(defaultContactConfig)
+  const contactConfig = defaultContactConfig
   const [prospectStatusFilter, setProspectStatusFilter] = useState('all')
   const [serviceFilter, setServiceFilter] = useState('all')
   const [areaFilter, setAreaFilter] = useState('all')
-  const [selectedProspectStatus, setSelectedProspectStatus] = useState('ready_to_contact')
+  const [selectedProspectStatus, setSelectedProspectStatus] = useState('contacted')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
+  const [peoplePage, setPeoplePage] = useState(1)
+  const [peoplePageSize, setPeoplePageSize] = useState(50)
+  const [peopleCompanyFilter, setPeopleCompanyFilter] = useState('all')
+  const [peopleRoleFilter, setPeopleRoleFilter] = useState('all')
+  const [peopleStatusFilter, setPeopleStatusFilter] = useState('all')
+  const [peopleSourceFilter, setPeopleSourceFilter] = useState('all')
   const companiesQuery = useQuery({
     queryKey: ['db-companies'],
     queryFn: getDbCompanies,
@@ -875,10 +1144,15 @@ export function ProspectsPage() {
     queryFn: getProspects,
     refetchInterval: 10000,
   })
+  const peopleQuery = useQuery({
+    queryKey: ['db-people'],
+    queryFn: getDbPeople,
+    refetchInterval: 10000,
+  })
   const leads = useMemo(() => companiesQuery.data?.companies ?? [], [companiesQuery.data?.companies])
   const prospectStatusByCompanyId = useMemo(() => {
     const entries: [string, string][] =
-      prospectsQuery.data?.prospects.map((prospect) => [String(prospect.company_id), String(prospect.status ?? 'new')]) ?? []
+      prospectsQuery.data?.prospects.map((prospect) => [String(prospect.company_id), simplifiedProspectStatus(prospect.status)]) ?? []
     return new Map(entries)
   }, [prospectsQuery.data?.prospects])
   const prospectByCompanyId = useMemo(() => {
@@ -896,8 +1170,9 @@ export function ProspectsPage() {
   }, [prospectsQuery.data?.prospects])
   const filtered = useMemo(
     () =>
-      filterLeads(leads, filters).filter((lead) => {
+      leads.filter((lead) => {
         const prospect = prospectByCompanyId.get(lead.id)
+        if (!prospect) return false
         const service = String(prospect?.service_query ?? '').trim()
         const area = String(prospect?.area_query ?? '').trim()
         if (prospectStatusFilter !== 'all' && (prospectStatusByCompanyId.get(lead.id) ?? 'new') !== prospectStatusFilter) return false
@@ -905,7 +1180,7 @@ export function ProspectsPage() {
         if (areaFilter !== 'all' && area !== areaFilter) return false
         return true
       }),
-    [areaFilter, filters, leads, prospectByCompanyId, prospectStatusByCompanyId, prospectStatusFilter, serviceFilter]
+    [areaFilter, leads, prospectByCompanyId, prospectStatusByCompanyId, prospectStatusFilter, serviceFilter]
   )
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(page, pageCount)
@@ -915,6 +1190,50 @@ export function ProspectsPage() {
   const visibleIds = paginated.map((lead) => lead.id)
   const selectedVisibleCount = selectedIds.filter((id) => visibleIds.includes(id)).length
   const allVisibleSelected = paginated.length > 0 && selectedVisibleCount === paginated.length
+  const filteredCompanyIds = useMemo(() => new Set(filtered.map((lead) => lead.id)), [filtered])
+  const relatedPeople = useMemo(
+    () =>
+      (peopleQuery.data?.people ?? []).filter((person) =>
+        filteredCompanyIds.has(String(person.company_id ?? ''))
+      ),
+    [filteredCompanyIds, peopleQuery.data?.people]
+  )
+  const relatedPeopleByCompanyId = useMemo(() => {
+    const map = new Map<string, Array<Record<string, unknown>>>()
+    for (const person of peopleQuery.data?.people ?? []) {
+      const companyId = String(person.company_id ?? '')
+      if (!companyId) continue
+      map.set(companyId, [...(map.get(companyId) ?? []), person])
+    }
+    return map
+  }, [peopleQuery.data?.people])
+  const peopleCompanyOptions = useMemo<[string, string][]>(() => {
+    const options = filtered
+      .filter((lead) => relatedPeopleByCompanyId.has(lead.id))
+      .map((lead) => [lead.id, lead.companyName] as [string, string])
+      .sort((a, b) => a[1].localeCompare(b[1]))
+    return [['all', 'All companies'], ...options]
+  }, [filtered, relatedPeopleByCompanyId])
+  const peopleRoleOptions = useMemo<[string, string][]>(() => {
+    const roles = [...new Set(relatedPeople.map((person) => String(person.role ?? '').trim()).filter(Boolean))]
+    return [['all', 'All roles'], ...roles.sort().map((role) => [role, role] as [string, string])]
+  }, [relatedPeople])
+  const filteredRelatedPeople = useMemo(
+    () =>
+      relatedPeople.filter((person) => {
+        if (peopleCompanyFilter !== 'all' && String(person.company_id ?? '') !== peopleCompanyFilter) return false
+        if (peopleRoleFilter !== 'all' && String(person.role ?? '') !== peopleRoleFilter) return false
+        if (peopleStatusFilter !== 'all' && String(person.status ?? 'found') !== peopleStatusFilter) return false
+        if (peopleSourceFilter !== 'all' && String(person.source ?? 'website') !== peopleSourceFilter) return false
+        return true
+      }),
+    [peopleCompanyFilter, peopleRoleFilter, peopleSourceFilter, peopleStatusFilter, relatedPeople]
+  )
+  const peoplePageCount = Math.max(1, Math.ceil(filteredRelatedPeople.length / peoplePageSize))
+  const currentPeoplePage = Math.min(peoplePage, peoplePageCount)
+  const peoplePageStart = filteredRelatedPeople.length === 0 ? 0 : (currentPeoplePage - 1) * peoplePageSize + 1
+  const peoplePageEnd = Math.min(currentPeoplePage * peoplePageSize, filteredRelatedPeople.length)
+  const paginatedPeople = filteredRelatedPeople.slice((currentPeoplePage - 1) * peoplePageSize, currentPeoplePage * peoplePageSize)
 
   const enrichMutation = useMutation({
     mutationFn: (task: EnrichmentTask) =>
@@ -935,6 +1254,32 @@ export function ProspectsPage() {
         description: error instanceof Error ? error.message : String(error),
       }),
   })
+  const apolloSearchMutation = useMutation({
+    mutationFn: () => startApolloPeopleSearch(selectedIds, refreshSelected, false),
+    onSuccess: ({ job }) => {
+      toast.success('Apollo people search started', { description: job.message })
+      void queryClient.invalidateQueries({ queryKey: ['jobs'] })
+      void queryClient.invalidateQueries({ queryKey: ['db-companies'] })
+      void queryClient.invalidateQueries({ queryKey: ['db-people'] })
+    },
+    onError: (error) =>
+      toast.error('Could not start Apollo people search', {
+        description: error instanceof Error ? error.message : String(error),
+      }),
+  })
+  const revealMutation = useMutation({
+    mutationFn: revealApolloEmail,
+    onSuccess: () => {
+      toast.success('Apollo email reveal finished')
+      void queryClient.invalidateQueries({ queryKey: ['db-companies'] })
+      void queryClient.invalidateQueries({ queryKey: ['db-people'] })
+      void queryClient.invalidateQueries({ queryKey: ['prospects'] })
+    },
+    onError: (error) =>
+      toast.error('Could not reveal Apollo email', {
+        description: error instanceof Error ? error.message : String(error),
+      }),
+  })
   const statusMutation = useMutation({
     mutationFn: async ({ ids, status }: { ids: string[]; status: string }) => {
       await Promise.all(ids.map((id) => updateCrmRecordStatus('prospects', `prospect-${id}`, status)))
@@ -947,6 +1292,18 @@ export function ProspectsPage() {
     },
     onError: (error) => toast.error('Could not update prospect status', { description: error instanceof Error ? error.message : String(error) }),
   })
+  const personStatusMutation = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: string }) => updateCrmRecordStatus('people', id, status),
+    onSuccess: () => {
+      toast.success('Contact status updated')
+      void queryClient.invalidateQueries({ queryKey: ['db-people'] })
+    },
+            onError: (error) => toast.error('Could not update contact status', { description: error instanceof Error ? error.message : String(error) }),
+  })
+  const readyPeopleCount = relatedPeople.filter((person) => String(person.status ?? '') === 'ready_for_outreach').length
+  const apolloPeopleCount = relatedPeople.filter((person) => String(person.source ?? '') === 'apollo').length
+  const missingEmailCount = relatedPeople.filter((person) => !person.email).length
+  const selectedLabel = selectedIds.length > 0 ? `${selectedIds.length} selected` : 'No selection'
 
   function toggleLead(leadId: string, checked: boolean) {
     setSelectedIds((current) =>
@@ -967,132 +1324,121 @@ export function ProspectsPage() {
       title='Prospects'
       description='Cold companies found by Searcher. Enrich, find contacts, export, or convert after interaction.'
     >
-      <div className='grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]'>
-        <Card>
-          <CardHeader>
-            <CardTitle>Prospect workspace</CardTitle>
-            <CardDescription>Filter cold companies, select the best rows, then enrich or move them forward.</CardDescription>
-          </CardHeader>
-          <CardContent className='space-y-3'>
-            <LeadFilters
-              filters={filters}
-              onChange={(nextFilters) => {
-                setFilters(nextFilters)
-                setPage(1)
-              }}
-            />
-            <div className='grid gap-3 md:grid-cols-3'>
-              <Field label='Prospect status'>
-                <FilterSelect
-                  value={prospectStatusFilter}
-                  onChange={(status) => {
-                    setProspectStatusFilter(status)
-                    setPage(1)
-                  }}
-                  options={optionFor('prospect_status', prospectStatuses, true, 'All statuses')}
-                />
-              </Field>
-              <Field label='Service type'>
-                <FilterSelect
-                  value={serviceFilter}
-                  onChange={(service) => {
-                    setServiceFilter(service)
-                    setPage(1)
-                  }}
-                  options={serviceOptions}
-                />
-              </Field>
-              <Field label='Area'>
-                <FilterSelect
-                  value={areaFilter}
-                  onChange={(area) => {
-                    setAreaFilter(area)
-                    setPage(1)
-                  }}
-                  options={areaOptions}
-                />
-              </Field>
+      <Card>
+        <CardContent className='space-y-3 p-4'>
+          <div className='flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between'>
+            <div>
+              <CardTitle className='text-base'>Prospect controls</CardTitle>
+              <CardDescription>Filter, select, find people, then move qualified prospects forward.</CardDescription>
             </div>
-            <div className='grid gap-3 rounded-lg border bg-muted/20 p-3 text-sm sm:grid-cols-3'>
-              <div>
-                <div className='text-muted-foreground'>Visible prospects</div>
-                <div className='text-2xl font-semibold'>{filtered.length}</div>
-              </div>
-              <div>
-                <div className='text-muted-foreground'>Selected</div>
-                <div className='text-2xl font-semibold'>{selectedIds.length}</div>
-              </div>
-              <div>
-                <div className='text-muted-foreground'>CRM records</div>
-                <div className='text-2xl font-semibold'>{prospectsQuery.data?.prospects.length ?? 0}</div>
-              </div>
+            <div className='flex flex-wrap items-center gap-2'>
+              <Badge variant={selectedIds.length > 0 ? 'default' : 'secondary'}>{selectedLabel}</Badge>
+              <Badge variant='outline'>Prospects {filtered.length}</Badge>
+              <Badge variant='outline'>People {relatedPeople.length}</Badge>
+              <Badge variant='outline'>Apollo {apolloPeopleCount}</Badge>
+              <Badge variant='outline'>Ready {readyPeopleCount}</Badge>
+              <Badge variant='outline'>Need email {missingEmailCount}</Badge>
+              <Button
+                type='button'
+                variant='secondary'
+                size='sm'
+                disabled={filtered.length === 0}
+                onClick={() => setSelectedIds(filtered.map((lead) => lead.id))}
+              >
+                Select all
+              </Button>
+              <Button
+                type='button'
+                variant='secondary'
+                size='sm'
+                disabled={selectedIds.length === 0}
+                onClick={() => setSelectedIds([])}
+              >
+                Clear
+              </Button>
             </div>
-          </CardContent>
-        </Card>
+          </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Selected prospect actions</CardTitle>
-            <CardDescription>Actions run only on rows selected in the table below.</CardDescription>
-          </CardHeader>
-          <CardContent className='space-y-3'>
-            <div className='rounded-lg border bg-muted/20 p-3'>
-              <div className='text-sm text-muted-foreground'>Current selection</div>
-              <div className='text-2xl font-semibold'>{selectedIds.length}</div>
-            </div>
-            <label className='flex items-center gap-2 text-sm text-muted-foreground'>
+          <div className='grid gap-3 md:grid-cols-3'>
+                <Field label='Prospect status'>
+                  <FilterSelect
+                    value={prospectStatusFilter}
+                    onChange={(status) => {
+                      setProspectStatusFilter(status)
+                      setPage(1)
+                      setPeoplePage(1)
+                    }}
+                    options={statusOptions(prospectStatuses, true)}
+                  />
+                </Field>
+                <Field label='Service type'>
+                  <FilterSelect
+                    value={serviceFilter}
+                    onChange={(service) => {
+                      setServiceFilter(service)
+                      setPage(1)
+                      setPeoplePage(1)
+                    }}
+                    options={serviceOptions}
+                  />
+                </Field>
+                <Field label='Area'>
+                  <FilterSelect
+                    value={areaFilter}
+                    onChange={(area) => {
+                      setAreaFilter(area)
+                      setPage(1)
+                      setPeoplePage(1)
+                    }}
+                    options={areaOptions}
+                  />
+                </Field>
+          </div>
+
+          <div className='flex flex-wrap items-end gap-2 rounded-lg border bg-muted/15 p-2'>
+            <Button
+              type='button'
+              variant='secondary'
+              size='sm'
+              disabled={selectedIds.length === 0 || apolloSearchMutation.isPending}
+              onClick={() => apolloSearchMutation.mutate()}
+            >
+              <UserRound className='size-4' />
+              Apollo people
+            </Button>
+            <Button
+              type='button'
+              size='sm'
+              disabled={selectedIds.length === 0 || enrichMutation.isPending}
+              onClick={() => enrichMutation.mutate('contacts')}
+            >
+              <Sparkles className='size-4' />
+              Find contacts
+            </Button>
+            <label className='flex h-9 items-center gap-2 px-2 text-xs text-muted-foreground'>
               <Checkbox
                 checked={refreshSelected}
                 onCheckedChange={(checked) => setRefreshSelected(Boolean(checked))}
               />
-              Force refresh existing enrichment
+              Force refresh
             </label>
-            <div className='flex flex-wrap gap-2'>
-              <Button
-                type='button'
-                variant='secondary'
-                disabled={selectedIds.length === 0 || enrichMutation.isPending}
-                onClick={() => enrichMutation.mutate('summary')}
-              >
-                Summarize + fill data
-              </Button>
-              <Button
-                type='button'
-                disabled={selectedIds.length === 0 || enrichMutation.isPending}
-                onClick={() => enrichMutation.mutate('contacts')}
-              >
-                <Sparkles className='size-4' />
-                Find contacts
-              </Button>
-              <Dialog>
-                <DialogTrigger asChild>
-                  <Button type='button' variant='secondary'>Contact rules</Button>
-                </DialogTrigger>
-                <DialogContent className='sm:max-w-4xl'>
-                  <DialogHeader>
-                    <DialogTitle>Contact discovery rules</DialogTitle>
-                    <DialogDescription>Choose how the app searches for owners, managers, and real company contacts.</DialogDescription>
-                  </DialogHeader>
-                  <ContactDiscoverySettings value={contactConfig} onChange={setContactConfig} />
-                </DialogContent>
-              </Dialog>
+            <div className='h-8 w-px bg-border' />
+            <div className='w-[180px]'>
+              <FilterSelect value={selectedProspectStatus} onChange={setSelectedProspectStatus} options={statusOptions(prospectStatuses)} />
             </div>
-            <div className='h-px bg-border' />
-            <div className='grid gap-2 sm:grid-cols-[1fr_auto]'>
-              <FilterSelect value={selectedProspectStatus} onChange={setSelectedProspectStatus} options={optionFor('prospect_status', prospectStatuses)} />
-              <Button
-                type='button'
-                variant='secondary'
-                disabled={selectedIds.length === 0 || statusMutation.isPending}
-                onClick={() => statusMutation.mutate({ ids: selectedIds, status: selectedProspectStatus })}
-              >
-                Update status
-              </Button>
-            </div>
+            <Button
+              type='button'
+              size='sm'
+              variant='secondary'
+              disabled={selectedIds.length === 0 || statusMutation.isPending}
+              onClick={() => statusMutation.mutate({ ids: selectedIds, status: selectedProspectStatus })}
+            >
+              Update status
+            </Button>
             <Dialog>
               <DialogTrigger asChild>
-                <Button type='button' disabled={selectedIds.length === 0}>
-                  Convert selected to leads
+                <Button type='button' size='sm' disabled={selectedIds.length === 0}>
+                  Convert selected
                 </Button>
               </DialogTrigger>
               <DialogContent className='sm:max-w-3xl'>
@@ -1111,62 +1457,171 @@ export function ProspectsPage() {
               status={prospectStatusFilter}
               presetColumns={['company_name', 'website', 'phone', 'email', 'rating', 'review_count', 'status', 'primary_person_name', 'primary_person_email']}
             />
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Prospect table</CardTitle>
-          <CardDescription>
-            Showing {filtered.length} of {leads.length} Postgres prospects.
-            {prospectsQuery.data ? ` CRM prospect records: ${prospectsQuery.data.prospects.length}.` : ''}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className='space-y-4'>
-          <div className='space-y-3'>
-            <PaginationControls
-              page={currentPage}
-              pageCount={pageCount}
-              pageSize={pageSize}
-              totalItems={filtered.length}
-              pageStart={pageStart}
-              pageEnd={pageEnd}
-              selectedVisibleCount={selectedVisibleCount}
-              onPageChange={setPage}
-              onPageSizeChange={(nextPageSize) => {
-                setPageSize(nextPageSize)
-                setPage(1)
-              }}
-            />
-            <LeadsTable
-              leads={paginated}
-              selectedIds={selectedIds}
-              allVisibleSelected={allVisibleSelected}
-              prospectByCompanyId={prospectByCompanyId}
-              prospectFields={crudFields.prospect}
-              onToggleLead={toggleLead}
-              onToggleVisible={toggleVisible}
-              onUpdateProspect={prospectCrud.updateRecord}
-              onDeleteProspect={prospectCrud.deleteRecord}
-            />
-            <PaginationControls
-              page={currentPage}
-              pageCount={pageCount}
-              pageSize={pageSize}
-              totalItems={filtered.length}
-              pageStart={pageStart}
-              pageEnd={pageEnd}
-              selectedVisibleCount={selectedVisibleCount}
-              onPageChange={setPage}
-              onPageSizeChange={(nextPageSize) => {
-                setPageSize(nextPageSize)
-                setPage(1)
-              }}
-            />
           </div>
         </CardContent>
       </Card>
+
+      <Tabs defaultValue='companies' className='space-y-4'>
+        <TabsList>
+          <TabsTrigger value='companies'>Companies ({filtered.length})</TabsTrigger>
+          <TabsTrigger value='people'>People ({filteredRelatedPeople.length})</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value='companies'>
+          <Card>
+            <CardHeader>
+              <CardTitle>Prospect companies</CardTitle>
+              <CardDescription>
+                Showing {filtered.length} of {leads.length} companies linked to prospect records.
+                {prospectsQuery.data ? ` CRM prospect records: ${prospectsQuery.data.prospects.length}.` : ''}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className='space-y-4'>
+              <div className='space-y-3'>
+                <PaginationControls
+                  page={currentPage}
+                  pageCount={pageCount}
+                  pageSize={pageSize}
+                  totalItems={filtered.length}
+                  pageStart={pageStart}
+                  pageEnd={pageEnd}
+                  selectedVisibleCount={selectedVisibleCount}
+                  itemLabel='companies'
+                  onPageChange={setPage}
+                  onPageSizeChange={(nextPageSize) => {
+                    setPageSize(nextPageSize)
+                    setPage(1)
+                  }}
+                />
+                <LeadsTable
+                  leads={paginated}
+                  selectedIds={selectedIds}
+                  allVisibleSelected={allVisibleSelected}
+                  prospectByCompanyId={prospectByCompanyId}
+                  relatedPeopleByCompanyId={relatedPeopleByCompanyId}
+                  prospectFields={crudFields.prospect}
+                  onUpdateCompany={companyCrud.updateRecord}
+                  onToggleLead={toggleLead}
+                  onToggleVisible={toggleVisible}
+                  onUpdateProspect={prospectCrud.updateRecord}
+                  onDeleteProspect={prospectCrud.deleteRecord}
+                />
+                <PaginationControls
+                  page={currentPage}
+                  pageCount={pageCount}
+                  pageSize={pageSize}
+                  totalItems={filtered.length}
+                  pageStart={pageStart}
+                  pageEnd={pageEnd}
+                  selectedVisibleCount={selectedVisibleCount}
+                  itemLabel='companies'
+                  onPageChange={setPage}
+                  onPageSizeChange={(nextPageSize) => {
+                    setPageSize(nextPageSize)
+                    setPage(1)
+                  }}
+                />
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value='people'>
+          <Card>
+            <CardHeader>
+              <CardTitle>Related people</CardTitle>
+              <CardDescription>
+                Showing {filteredRelatedPeople.length} of {relatedPeople.length} people connected to the filtered prospect companies.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className='space-y-4'>
+              <div className='grid gap-3 rounded-lg border bg-muted/20 p-3 md:grid-cols-2 xl:grid-cols-4'>
+                <Field label='Company'>
+                  <FilterSelect
+                    value={peopleCompanyFilter}
+                    onChange={(companyId) => {
+                      setPeopleCompanyFilter(companyId)
+                      setPeoplePage(1)
+                    }}
+                    options={peopleCompanyOptions}
+                  />
+                </Field>
+                <Field label='Role'>
+                  <FilterSelect
+                    value={peopleRoleFilter}
+                    onChange={(role) => {
+                      setPeopleRoleFilter(role)
+                      setPeoplePage(1)
+                    }}
+                    options={peopleRoleOptions}
+                  />
+                </Field>
+                <Field label='Status'>
+                  <FilterSelect
+                    value={peopleStatusFilter}
+                    onChange={(status) => {
+                      setPeopleStatusFilter(status)
+                      setPeoplePage(1)
+                    }}
+                    options={optionFor('person_status', personStatuses, true, 'All statuses')}
+                  />
+                </Field>
+                <Field label='Source'>
+                  <FilterSelect
+                    value={peopleSourceFilter}
+                    onChange={(source) => {
+                      setPeopleSourceFilter(source)
+                      setPeoplePage(1)
+                    }}
+                    options={optionFor('contact_source', ['website', 'apollo', 'linkedin-search', 'google-search', 'inferred', 'manual'], true, 'All sources')}
+                  />
+                </Field>
+              </div>
+              <PaginationControls
+                page={currentPeoplePage}
+                pageCount={peoplePageCount}
+                pageSize={peoplePageSize}
+                totalItems={filteredRelatedPeople.length}
+                pageStart={peoplePageStart}
+                pageEnd={peoplePageEnd}
+                selectedVisibleCount={0}
+                itemLabel='people'
+                onPageChange={setPeoplePage}
+                onPageSizeChange={(nextPageSize) => {
+                  setPeoplePageSize(nextPageSize)
+                  setPeoplePage(1)
+                }}
+              />
+              <PeopleTable
+                people={paginatedPeople}
+                onStatusChange={(id, status) => personStatusMutation.mutate({ id, status })}
+                onRevealApolloEmail={(id) => revealMutation.mutate(id)}
+                revealingPersonId={revealMutation.variables}
+                onUpdate={peopleCrud.updateRecord}
+                onDelete={peopleCrud.deleteRecord}
+                statusOptions={optionFor('person_status', personStatuses).map(([value]) => value)}
+                crudFields={crudFields.people}
+                prospectByCompanyId={prospectByCompanyId}
+              />
+              <PaginationControls
+                page={currentPeoplePage}
+                pageCount={peoplePageCount}
+                pageSize={peoplePageSize}
+                totalItems={filteredRelatedPeople.length}
+                pageStart={peoplePageStart}
+                pageEnd={peoplePageEnd}
+                selectedVisibleCount={0}
+                itemLabel='people'
+                onPageChange={setPeoplePage}
+                onPageSizeChange={(nextPageSize) => {
+                  setPeoplePageSize(nextPageSize)
+                  setPeoplePage(1)
+                }}
+              />
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </PageShell>
   )
 }
@@ -1366,28 +1821,34 @@ export function CrmDashboardPage() {
   const stats = dashboardQuery.data?.dashboard
 
   return (
-    <PageShell title='Dashboard' description='CRM overview for prospects, real leads, demos, tasks, and pipeline.'>
-      <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-6'>
-        {[
-          ['Prospects', stats?.prospects ?? 0],
-          ['Leads', stats?.leads ?? 0],
-          ['Pipeline', stats?.opportunities ?? 0],
-          ['Demos', stats?.demos ?? 0],
-          ['Open tasks', stats?.openTasks ?? 0],
-          ['Inbox', stats?.inboxItems ?? 0],
-        ].map(([label, value]) => (
-          <Card key={String(label)}>
-            <CardHeader>
-              <CardTitle>{String(value)}</CardTitle>
-              <CardDescription>{String(label)}</CardDescription>
-            </CardHeader>
-          </Card>
-        ))}
+    <PageShell title='Dashboard' description='Lead generation, prospect quality, contact readiness, and sales motion at a glance.'>
+      <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-4'>
+        <DashboardMetricCard title='Companies found' value={stats?.companies ?? 0} description='Search-discovered companies in Postgres' icon={Building2} />
+        <DashboardMetricCard title='Active prospects' value={stats?.prospects ?? 0} description={`${stats?.funnel.readyProspects ?? 0} ready to contact`} icon={Sparkles} />
+        <DashboardMetricCard title='Lead conversion' value={`${stats?.funnel.leadConversionRate ?? 0}%`} description={`${stats?.funnel.convertedLeads ?? 0} prospects converted`} icon={CheckCircle2} />
+        <DashboardMetricCard title='Open pipeline' value={formatCurrency(stats?.pipeline.openValue ?? 0)} description={`${stats?.opportunities ?? 0} active opportunities`} icon={BriefcaseBusiness} />
       </div>
+
+      <div className='grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]'>
+        <DashboardFunnel dashboard={stats} />
+        <DashboardActionQueue dashboard={stats} />
+      </div>
+
+      <div className='grid gap-4 xl:grid-cols-3'>
+        <DashboardQualityCard dashboard={stats} />
+        <DashboardReadinessCard dashboard={stats} />
+        <DashboardPipelineCard dashboard={stats} />
+      </div>
+
+      <div className='grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]'>
+        <DashboardTopProspects prospects={stats?.topProspects ?? []} />
+        <DashboardSearchPerformance dashboard={stats} />
+      </div>
+
       <Card>
         <CardHeader>
           <CardTitle>Latest activity</CardTitle>
-          <CardDescription>Recent CRM timeline events.</CardDescription>
+          <CardDescription>Recent CRM timeline events across prospects, leads, demos, and tasks.</CardDescription>
         </CardHeader>
         <CardContent>
           <ActivityTable
@@ -1711,39 +2172,160 @@ export function CrmTasksPage() {
 
 export function InboxPage() {
   const inboxCrud = useRecordCrud('webhook_events', ['inbox', 'crm-dashboard'])
-  const { optionFor } = useCrmOptionConfig()
+  const [typeFilter, setTypeFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
   const inboxQuery = useQuery({ queryKey: ['inbox'], queryFn: getInbox, refetchInterval: 10000 })
-  const items = inboxQuery.data?.items ?? []
-  const filteredItems = items.filter((item) => statusFilter === 'all' || item.status === statusFilter)
+  const items = useMemo(() => inboxQuery.data?.items ?? [], [inboxQuery.data?.items])
+  const typeOptions = useMemo<[string, string][]>(() => {
+    const types = [...new Set(items.map((item) => String(item.item_type ?? '')).filter(Boolean))]
+    return [['all', 'All work types'], ...types.map((type) => [type, inboxTypeLabel(type)] as [string, string])]
+  }, [items])
+  const statusOptions = useMemo<[string, string][]>(() => {
+    const statuses = [...new Set(items.map((item) => String(item.status ?? '')).filter(Boolean))]
+    return [['all', 'All statuses'], ...statuses.map((status) => [status, titleize(status)] as [string, string])]
+  }, [items])
+  const filteredItems = items.filter((item) => {
+    if (typeFilter !== 'all' && item.item_type !== typeFilter) return false
+    if (statusFilter !== 'all' && item.status !== statusFilter) return false
+    return true
+  })
+  const urgentCount = items.filter((item) => item.priority === 'high').length
+  const overdueCount = items.filter((item) => item.is_overdue === true).length
+  const inboundCount = items.filter((item) => item.item_type === 'webhook_event').length
+  const readyProspectCount = items.filter((item) => item.item_type === 'ready_prospect').length
+
   return (
-    <PageShell title='Inbox' description='Inbound events that need review, dedupe, or follow-up.'>
+    <PageShell title='Work Inbox' description='Daily work queue for inbound issues, follow-ups, ready prospects, tasks, and demos.'>
+      <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-4'>
+        <DashboardMetricCard title='Open work items' value={items.length} description={`${filteredItems.length} visible with current filters`} icon={Activity} />
+        <DashboardMetricCard title='High priority' value={urgentCount} description='Failed webhooks, overdue items, or high-priority work' icon={CircleAlert} />
+        <DashboardMetricCard title='Overdue' value={overdueCount} description='Tasks, lead follow-ups, or demos past due' icon={CheckCircle2} />
+        <DashboardMetricCard title='Ready prospects' value={readyProspectCount} description='Prospects waiting for contact or conversion' icon={UserRound} />
+      </div>
       <Card>
-        <CardHeader>
-          <CardTitle>Inbox</CardTitle>
-          <CardDescription>Showing {filteredItems.length} of {items.length} inbound items.</CardDescription>
+        <CardHeader className='flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between'>
+          <div>
+            <CardTitle>Work queue</CardTitle>
+            <CardDescription>
+              Showing {filteredItems.length} of {items.length} work items. {inboundCount} inbound webhook item{inboundCount === 1 ? '' : 's'} need review.
+            </CardDescription>
+          </div>
+          <div className='grid gap-3 sm:grid-cols-2 lg:min-w-[420px]'>
+            <Field label='Work type'>
+              <FilterSelect value={typeFilter} onChange={setTypeFilter} options={typeOptions} />
+            </Field>
+            <Field label='Status'>
+              <FilterSelect value={statusFilter} onChange={setStatusFilter} options={statusOptions} />
+            </Field>
+          </div>
         </CardHeader>
-        <CardContent className='space-y-3'>
-          <Field label='Status filter'>
-            <FilterSelect value={statusFilter} onChange={setStatusFilter} options={optionFor('webhook_event_status', ['received', 'processed', 'duplicate', 'failed'], true, 'All statuses')} />
-          </Field>
-          <SimpleRecordsTable
-            rows={filteredItems}
-            columns={['item_type', 'source_key', 'status', 'created_at', 'error_message']}
-            statusOptions={optionFor('webhook_event_status', ['received', 'processed', 'duplicate', 'failed']).map(([value]) => value)}
-            onStatusChange={(id, status) => inboxCrud.updateRecord(id, { status })}
-            crudFields={[
-              { key: 'status', label: 'Status', type: 'select', options: optionFor('webhook_event_status', ['received', 'processed', 'duplicate', 'failed']) },
-              { key: 'error_message', label: 'Error message', type: 'textarea' },
-            ]}
-            onUpdate={inboxCrud.updateRecord}
-            onDelete={inboxCrud.deleteRecord}
+        <CardContent>
+          <WorkInboxTable
+            items={filteredItems}
+            onResolveWebhook={(id) => inboxCrud.updateRecord(id, { status: 'processed' })}
+            onDeleteWebhook={inboxCrud.deleteRecord}
           />
         </CardContent>
       </Card>
-      <GenericExportWizard view='inbox' title='Inbox export wizard' description='Build a custom Excel from the current inbox status filter.' itemLabel='inbox items' status={statusFilter} presetColumns={['item_type', 'source_key', 'status', 'created_at', 'error_message']} />
+      <GenericExportWizard view='inbox' title='Work inbox export wizard' description='Build a custom Excel from current inbox work items.' itemLabel='work items' status={statusFilter} presetColumns={['item_type', 'title', 'company_name', 'person_name', 'status', 'priority', 'due_at', 'created_at']} />
     </PageShell>
   )
+}
+
+function WorkInboxTable({
+  items,
+  onResolveWebhook,
+  onDeleteWebhook,
+}: {
+  items: Array<Record<string, unknown>>
+  onResolveWebhook: (id: string) => void
+  onDeleteWebhook: (id: string) => void
+}) {
+  if (items.length === 0) {
+    return <EmptyDashboardState message='No inbox work matches the current filters.' />
+  }
+
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Work item</TableHead>
+          <TableHead>Company / contact</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>Due</TableHead>
+          <TableHead>Action</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {items.map((item) => {
+          const id = String(item.id ?? '')
+          const itemType = String(item.item_type ?? '')
+          const isWebhook = itemType === 'webhook_event'
+          return (
+            <TableRow key={`${itemType}-${id}`}>
+              <TableCell className='min-w-[280px] whitespace-normal'>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <Badge variant={item.priority === 'high' ? 'destructive' : 'secondary'}>
+                    {inboxTypeLabel(itemType)}
+                  </Badge>
+                  <Badge variant='outline'>{titleize(String(item.priority ?? 'medium'))}</Badge>
+                </div>
+                <div className='mt-2 font-medium'>{String(item.title ?? '')}</div>
+                <p className='mt-1 line-clamp-2 text-sm text-muted-foreground'>
+                  {String(item.description ?? '')}
+                </p>
+              </TableCell>
+              <TableCell className='whitespace-normal'>
+                <div>{String(item.company_name ?? item.source_key ?? '')}</div>
+                <div className='text-xs text-muted-foreground'>{String(item.person_name ?? '')}</div>
+              </TableCell>
+              <TableCell>
+                <Badge variant='outline'>{titleize(String(item.status ?? 'open'))}</Badge>
+              </TableCell>
+              <TableCell className='whitespace-normal text-sm'>
+                <div>{formatInboxDate(item.due_at)}</div>
+                <div className='text-xs text-muted-foreground'>
+                  Created {formatInboxDate(item.created_at)}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className='flex flex-wrap gap-2'>
+                  {isWebhook ? (
+                    <>
+                      <Button type='button' size='sm' variant='secondary' onClick={() => onResolveWebhook(id)}>
+                        Mark processed
+                      </Button>
+                      <Button type='button' size='sm' variant='destructive' onClick={() => onDeleteWebhook(id)}>
+                        Delete
+                      </Button>
+                    </>
+                  ) : (
+                    <Badge variant='secondary'>{String(item.action_label ?? 'Review')}</Badge>
+                  )}
+                </div>
+              </TableCell>
+            </TableRow>
+          )
+        })}
+      </TableBody>
+    </Table>
+  )
+}
+
+function inboxTypeLabel(type: string) {
+  const labels: Record<string, string> = {
+    webhook_event: 'Inbound issue',
+    task: 'Task',
+    lead_follow_up: 'Lead follow-up',
+    ready_prospect: 'Ready prospect',
+    demo: 'Demo',
+  }
+  return labels[type] ?? titleize(type)
+}
+
+function formatInboxDate(value: unknown) {
+  if (!value) return 'No due date'
+  return new Date(String(value)).toLocaleString()
 }
 
 export function FormsWebhooksPage() {
@@ -2216,6 +2798,322 @@ export function SettingsPage() {
   )
 }
 
+function DashboardMetricCard({
+  title,
+  value,
+  description,
+  icon: Icon,
+}: {
+  title: string
+  value: ReactNode
+  description: string
+  icon: ElementType
+}) {
+  return (
+    <Card>
+      <CardHeader className='space-y-3'>
+        <div className='flex items-center justify-between gap-3'>
+          <CardDescription>{title}</CardDescription>
+          <div className='rounded-md bg-primary/10 p-2 text-primary'>
+            <Icon className='size-4' />
+          </div>
+        </div>
+        <CardTitle className='text-3xl'>{value}</CardTitle>
+        <p className='text-sm text-muted-foreground'>{description}</p>
+      </CardHeader>
+    </Card>
+  )
+}
+
+function DashboardFunnel({ dashboard }: { dashboard?: CrmDashboard }) {
+  const funnel = [
+    { label: 'Companies discovered', value: dashboard?.funnel.companies ?? dashboard?.companies ?? 0 },
+    { label: 'Active prospects', value: dashboard?.funnel.prospects ?? dashboard?.prospects ?? 0 },
+    { label: 'Ready to contact', value: dashboard?.funnel.readyProspects ?? 0 },
+    { label: 'Converted leads', value: dashboard?.funnel.convertedLeads ?? 0 },
+    { label: 'Open opportunities', value: dashboard?.funnel.opportunities ?? dashboard?.opportunities ?? 0 },
+    { label: 'Scheduled demos', value: dashboard?.funnel.demos ?? dashboard?.demos ?? 0 },
+  ]
+  const max = Math.max(...funnel.map((step) => step.value), 1)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Prospecting funnel</CardTitle>
+        <CardDescription>
+          From scraped companies to sales conversations. Lead conversion is {dashboard?.funnel.leadConversionRate ?? 0}% and demo booking is {dashboard?.funnel.demoBookingRate ?? 0}%.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className='space-y-4'>
+        {funnel.map((step) => (
+          <DashboardBarRow key={step.label} label={step.label} value={step.value} max={max} />
+        ))}
+      </CardContent>
+    </Card>
+  )
+}
+
+function DashboardActionQueue({ dashboard }: { dashboard?: CrmDashboard }) {
+  const actions = [
+    { label: 'Ready prospects not converted', value: dashboard?.actions.readyUnconvertedProspects ?? 0, tone: 'text-emerald-600' },
+    { label: 'Overdue tasks', value: dashboard?.actions.overdueTasks ?? 0, tone: 'text-destructive' },
+    { label: 'Due today', value: dashboard?.actions.dueTodayTasks ?? 0, tone: 'text-amber-600' },
+    { label: 'Upcoming follow-ups', value: dashboard?.actions.upcomingFollowUps ?? 0, tone: 'text-primary' },
+    { label: 'Scheduled demos', value: dashboard?.actions.scheduledDemos ?? 0, tone: 'text-primary' },
+    { label: 'Inbox needs review', value: dashboard?.actions.inboxNeedsReview ?? 0, tone: 'text-destructive' },
+  ]
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Today&apos;s action queue</CardTitle>
+        <CardDescription>Work that needs attention before more scraping creates more volume.</CardDescription>
+      </CardHeader>
+      <CardContent className='grid gap-3 sm:grid-cols-2'>
+        {actions.map((action) => (
+          <div key={action.label} className='rounded-lg border bg-muted/20 p-3'>
+            <div className={`text-2xl font-semibold ${action.tone}`}>{formatNumber(action.value)}</div>
+            <div className='text-sm text-muted-foreground'>{action.label}</div>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  )
+}
+
+function DashboardQualityCard({ dashboard }: { dashboard?: CrmDashboard }) {
+  const prospects = Math.max(dashboard?.prospects ?? 0, 1)
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Prospect quality</CardTitle>
+        <CardDescription>Fit, reviews, enrichment, and score distribution.</CardDescription>
+      </CardHeader>
+      <CardContent className='space-y-4'>
+        <div className='grid grid-cols-2 gap-3'>
+          <MiniStat label='Avg fit score' value={dashboard?.quality.averageFitScore ?? 0} />
+          <MiniStat label='Avg lead score' value={dashboard?.quality.averageLeadScore ?? 0} />
+          <MiniStat label='Avg rating' value={(dashboard?.quality.averageRating ?? 0).toFixed(1)} />
+          <MiniStat label='Avg reviews' value={dashboard?.quality.averageReviews ?? 0} />
+        </div>
+        <DashboardBarRow label='Minimum reviews matched' value={dashboard?.quality.minReviewsMatched ?? 0} max={prospects} />
+        <DashboardBarRow label='Summaries complete' value={dashboard?.quality.summariesComplete ?? 0} max={prospects} />
+        <DashboardBarRow label='Score 80+' value={dashboard?.quality.highScoreProspects ?? 0} max={prospects} />
+        <DashboardBarRow label='Missing contact info' value={dashboard?.quality.missingContactInfo ?? 0} max={prospects} />
+      </CardContent>
+    </Card>
+  )
+}
+
+function DashboardReadinessCard({ dashboard }: { dashboard?: CrmDashboard }) {
+  const prospects = Math.max(dashboard?.prospects ?? 0, 1)
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Contact readiness</CardTitle>
+        <CardDescription>How many prospects are actually reachable.</CardDescription>
+      </CardHeader>
+      <CardContent className='space-y-4'>
+        <DashboardBarRow label='Has primary person' value={dashboard?.readiness.withPrimaryPerson ?? 0} max={prospects} />
+        <DashboardBarRow label='Ready contacts' value={dashboard?.readiness.readyContacts ?? 0} max={Math.max(dashboard?.readiness.withPrimaryPerson ?? 0, 1)} />
+        <DashboardBarRow label='Contacts with email' value={dashboard?.readiness.contactsWithEmail ?? 0} max={Math.max(dashboard?.readiness.withPrimaryPerson ?? 0, 1)} />
+        <div className='grid grid-cols-2 gap-3'>
+          <MiniStat label='Need email' value={dashboard?.readiness.needsEmailContacts ?? 0} />
+          <MiniStat label='No website' value={dashboard?.readiness.missingWebsite ?? 0} />
+          <MiniStat label='No phone' value={dashboard?.readiness.missingPhone ?? 0} />
+          <MiniStat label='No company email' value={dashboard?.readiness.missingEmail ?? 0} />
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function DashboardPipelineCard({ dashboard }: { dashboard?: CrmDashboard }) {
+  const max = Math.max(...(dashboard?.pipeline.byStage.map((stage) => stage.count) ?? [0]), 1)
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Pipeline snapshot</CardTitle>
+        <CardDescription>
+          {formatCurrency(dashboard?.pipeline.weightedValue ?? 0)} weighted from {formatCurrency(dashboard?.pipeline.openValue ?? 0)} open.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className='space-y-4'>
+        <div className='grid grid-cols-2 gap-3'>
+          <MiniStat label='Won' value={dashboard?.pipeline.won ?? 0} />
+          <MiniStat label='Lost' value={dashboard?.pipeline.lost ?? 0} />
+        </div>
+        {(dashboard?.pipeline.byStage ?? []).length === 0 ? (
+          <EmptyDashboardState message='No opportunities yet.' />
+        ) : (
+          dashboard?.pipeline.byStage.map((stage) => (
+            <DashboardBarRow key={stage.stage} label={titleize(stage.stage)} value={stage.count} max={max} detail={formatCurrency(stage.value)} />
+          ))
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function DashboardTopProspects({ prospects }: { prospects: CrmDashboard['topProspects'] }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Best prospects</CardTitle>
+        <CardDescription>Highest-scoring companies still active in the prospect pool.</CardDescription>
+      </CardHeader>
+      <CardContent className='space-y-3'>
+        {prospects.length === 0 ? (
+          <EmptyDashboardState message='No prospects found yet. Run a search to populate this list.' />
+        ) : (
+          prospects.map((prospect) => (
+            <div key={prospect.id} className='rounded-lg border p-3'>
+              <div className='flex flex-wrap items-start justify-between gap-3'>
+                <div>
+                  <div className='font-medium'>{prospect.companyName}</div>
+                  <div className='text-xs text-muted-foreground'>
+                    {[prospect.service, prospect.area].filter(Boolean).join(' • ') || 'No search context'}
+                  </div>
+                </div>
+                <Badge variant='secondary'>Score {prospect.score}</Badge>
+              </div>
+              <div className='mt-3 grid gap-2 text-sm sm:grid-cols-3'>
+                <span>{prospect.rating ? `${prospect.rating.toFixed(1)} stars` : 'No rating'}</span>
+                <span>{formatNumber(prospect.reviewCount)} reviews</span>
+                <span>{prospect.primaryPersonName ?? prospect.primaryPersonEmail ?? 'No primary contact'}</span>
+              </div>
+            </div>
+          ))
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function DashboardSearchPerformance({ dashboard }: { dashboard?: CrmDashboard }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Search performance</CardTitle>
+        <CardDescription>Which services, areas, and recent searches are producing qualified contacts.</CardDescription>
+      </CardHeader>
+      <CardContent className='space-y-5'>
+        <DashboardRankedList
+          title='Top services'
+          rows={(dashboard?.topServices ?? []).map((row) => ({
+            label: row.service,
+            value: row.qualified,
+            detail: `${row.prospects} prospects • ${row.readyContacts} ready contacts`,
+          }))}
+        />
+        <DashboardRankedList
+          title='Top areas'
+          rows={(dashboard?.topAreas ?? []).map((row) => ({
+            label: row.area,
+            value: row.qualified,
+            detail: `${row.prospects} prospects • ${row.readyContacts} ready contacts`,
+          }))}
+        />
+        <div className='space-y-2'>
+          <div className='text-sm font-medium'>Recent runs</div>
+          {(dashboard?.recentRuns ?? []).length === 0 ? (
+            <EmptyDashboardState message='No search runs yet.' />
+          ) : (
+            dashboard?.recentRuns.map((run) => (
+              <div key={run.id} className='grid gap-1 rounded-md border p-3 text-sm sm:grid-cols-[1fr_auto]'>
+                <div>
+                  <div className='font-medium'>{run.service} in {run.area}</div>
+                  <div className='text-xs text-muted-foreground'>{run.createdAt ? new Date(run.createdAt).toLocaleString() : ''}</div>
+                </div>
+                <div className='text-muted-foreground'>
+                  {run.qualified}/{run.leads} qualified • {run.readyContacts} contacts
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function DashboardRankedList({
+  title,
+  rows,
+}: {
+  title: string
+  rows: Array<{ label: string; value: number; detail: string }>
+}) {
+  const max = Math.max(...rows.map((row) => row.value), 1)
+  return (
+    <div className='space-y-2'>
+      <div className='text-sm font-medium'>{title}</div>
+      {rows.length === 0 ? (
+        <EmptyDashboardState message='No data yet.' />
+      ) : (
+        rows.map((row) => (
+          <DashboardBarRow key={row.label} label={row.label} value={row.value} max={max} detail={row.detail} />
+        ))
+      )}
+    </div>
+  )
+}
+
+function DashboardBarRow({
+  label,
+  value,
+  max,
+  detail,
+}: {
+  label: string
+  value: number
+  max: number
+  detail?: string
+}) {
+  const width = max <= 0 ? 0 : Math.round((value / max) * 100)
+  return (
+    <div className='space-y-1.5'>
+      <div className='flex items-center justify-between gap-3 text-sm'>
+        <span className='truncate'>{label}</span>
+        <span className='shrink-0 font-medium'>{formatNumber(value)}</span>
+      </div>
+      <div className='h-2 overflow-hidden rounded-full bg-muted'>
+        <div className='h-full rounded-full bg-primary transition-all duration-500' style={{ width: `${Math.max(value > 0 ? 4 : 0, Math.min(100, width))}%` }} />
+      </div>
+      {detail ? <div className='text-xs text-muted-foreground'>{detail}</div> : null}
+    </div>
+  )
+}
+
+function MiniStat({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className='rounded-lg border bg-muted/20 p-3'>
+      <div className='text-xl font-semibold'>{value}</div>
+      <div className='text-xs text-muted-foreground'>{label}</div>
+    </div>
+  )
+}
+
+function EmptyDashboardState({ message }: { message: string }) {
+  return (
+    <div className='rounded-lg border border-dashed p-4 text-center text-sm text-muted-foreground'>
+      {message}
+    </div>
+  )
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat().format(value)
+}
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  }).format(value)
+}
+
 function JobMonitor({ jobs, compact = false }: { jobs: ApiJob[]; compact?: boolean }) {
   const activeJobs = jobs.filter((job) => job.status === 'running')
   const visibleJobs = compact ? jobs.slice(0, 3) : jobs
@@ -2377,15 +3275,6 @@ function Field({
   )
 }
 
-function addUniqueItem(items: string[], value: string): string[] {
-  const next = value.trim()
-  if (!next || items.some((item) => item.toLowerCase() === next.toLowerCase())) {
-    return items
-  }
-
-  return [...items, next]
-}
-
 function LeadFilters({
   filters,
   onChange,
@@ -2491,77 +3380,6 @@ function FilterSelect({
   )
 }
 
-function ContactDiscoverySettings({
-  value,
-  onChange,
-}: {
-  value: ContactDiscoveryConfig
-  onChange: (value: ContactDiscoveryConfig) => void
-}) {
-  return (
-    <div className='grid gap-3 rounded-lg border bg-muted/20 p-3 text-sm lg:grid-cols-[1.2fr_1fr_1fr_1fr]'>
-      <Field label='Contact strategy'>
-        <select
-          value={value.strategy}
-          onChange={(event) =>
-            onChange({ ...value, strategy: event.target.value as ContactDiscoveryConfig['strategy'] })
-          }
-          className='h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none'
-        >
-          <option value='hybrid-quality'>Hybrid quality recommended</option>
-          <option value='apollo-first'>Apollo first</option>
-          <option value='website-first'>Website first</option>
-        </select>
-      </Field>
-      <Field label='Max contacts'>
-        <select
-          value={value.maxContactsPerCompany}
-          onChange={(event) => onChange({ ...value, maxContactsPerCompany: Number(event.target.value) })}
-          className='h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none'
-        >
-          {[1, 2, 3, 5].map((option) => (
-            <option key={option} value={option}>
-              {option} per company
-            </option>
-          ))}
-        </select>
-      </Field>
-      <div className='space-y-2'>
-        <Label>Apollo</Label>
-        <label className='flex h-9 items-center gap-2 rounded-md border bg-background px-3'>
-          <Checkbox
-            checked={value.apolloEnabled}
-            onCheckedChange={(checked) => onChange({ ...value, apolloEnabled: Boolean(checked) })}
-          />
-          Use Apollo when configured
-        </label>
-      </div>
-      <div className='space-y-2'>
-        <Label>Fallbacks</Label>
-        <div className='grid gap-2'>
-          <label className='flex items-center gap-2'>
-            <Checkbox
-              checked={value.allowInferredEmails}
-              onCheckedChange={(checked) => onChange({ ...value, allowInferredEmails: Boolean(checked) })}
-            />
-            Keep inferred emails as needs_email
-          </label>
-          <label className='flex items-center gap-2'>
-            <Checkbox
-              checked={value.genericFallbackEnabled}
-              onCheckedChange={(checked) => onChange({ ...value, genericFallbackEnabled: Boolean(checked) })}
-            />
-            Use info@ / sales@ fallback
-          </label>
-        </div>
-      </div>
-      <div className='text-xs text-muted-foreground lg:col-span-4'>
-        Hybrid quality keeps strong public website contacts, runs Apollo before weak inferred website guesses,
-        then falls back to generic company emails only when no person is found.
-      </div>
-    </div>
-  )
-}
 
 function PeopleFilters({
   filters,
@@ -2574,7 +3392,7 @@ function PeopleFilters({
 }) {
   const getOptions = optionFor ?? ((_category: string, fallback: string[], includeAll?: boolean) => statusOptions(fallback, includeAll))
   return (
-    <div className='grid gap-3 rounded-lg border bg-muted/20 p-3 md:grid-cols-2 xl:grid-cols-4'>
+    <div className='grid gap-3 rounded-lg border bg-muted/20 p-3 md:grid-cols-2 xl:grid-cols-5'>
       <div className='relative'>
         <Search className='absolute start-3 top-2.5 size-4 text-muted-foreground' />
         <Input
@@ -2584,6 +3402,16 @@ function PeopleFilters({
           onChange={(event) => onChange({ ...filters, search: event.target.value })}
         />
       </div>
+      <FilterSelect
+        value={filters.category}
+        onChange={(category) => onChange({ ...filters, category })}
+        options={[
+          ['all', 'All categories'],
+          ['person', 'Person'],
+          ['general_email', 'General Email'],
+          ['registry', 'Registry'],
+        ]}
+      />
       <FilterSelect
         value={filters.status}
         onChange={(status) => onChange({ ...filters, status })}
@@ -2702,7 +3530,9 @@ function LeadsTable({
   selectedIds,
   allVisibleSelected,
   prospectByCompanyId,
+  relatedPeopleByCompanyId,
   prospectFields,
+  onUpdateCompany,
   onToggleLead,
   onToggleVisible,
   onUpdateProspect,
@@ -2712,117 +3542,152 @@ function LeadsTable({
   selectedIds: string[]
   allVisibleSelected: boolean
   prospectByCompanyId?: Map<string, Record<string, unknown>>
+  relatedPeopleByCompanyId?: Map<string, Array<Record<string, unknown>>>
   prospectFields?: CrudField[]
+  onUpdateCompany?: (id: string, payload: Record<string, unknown>) => void
   onToggleLead: (leadId: string, checked: boolean) => void
   onToggleVisible: (checked: boolean) => void
   onUpdateProspect?: (id: string, payload: Record<string, unknown>) => void
   onDeleteProspect?: (id: string) => void
 }) {
+  const [selectedCompany, setSelectedCompany] = useState<{
+    lead: CompanyLead
+    prospect: Record<string, unknown>
+    people: Array<Record<string, unknown>>
+  } | null>(null)
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead className='w-12'>
-            <Checkbox
-              checked={allVisibleSelected}
-              onCheckedChange={(checked) => onToggleVisible(Boolean(checked))}
-              aria-label='Select all visible leads'
-            />
-          </TableHead>
-          <TableHead>Company</TableHead>
-          <TableHead>Segment</TableHead>
-          <TableHead>Proof</TableHead>
-          <TableHead>Contact</TableHead>
-          <TableHead>Key person</TableHead>
-          <TableHead>Score</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Actions</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {leads.map((lead) => {
-          const person = lead.keyPeople?.find(
-            (candidate) => candidate.status === 'ready_for_outreach'
-          )
-          const prospectRow = prospectByCompanyId?.get(lead.id) ?? {
-            id: `prospect-${lead.id}`,
-            status: lead.outreachStatus ?? 'new',
-            fit_score: lead.leadQualityScore,
-            contact_status: lead.outreachStatus,
-            service_query: lead.sources?.join(', '),
-            area_query: lead.location ?? lead.address,
-          }
-          return (
-            <TableRow key={lead.id}>
-              <TableCell>
-                <Checkbox
-                  checked={selectedIds.includes(lead.id)}
-                  onCheckedChange={(checked) => onToggleLead(lead.id, Boolean(checked))}
-                  aria-label={`Select ${lead.companyName}`}
-                />
-              </TableCell>
-              <TableCell className='min-w-[260px] whitespace-normal'>
-                <div className='font-medium'>{lead.companyName}</div>
-                <div className='text-xs text-muted-foreground'>{lead.website}</div>
-              </TableCell>
-              <TableCell className='min-w-[180px] whitespace-normal'>
-                <div className='font-medium'>{String(prospectRow.service_query ?? 'No service')}</div>
-                <div className='text-xs text-muted-foreground'>{String(prospectRow.area_query ?? 'No area')}</div>
-              </TableCell>
-              <TableCell>
-                {lead.rating ?? lead.websiteRating ?? 'N/A'} stars
-                <div className='text-xs text-muted-foreground'>
-                  {lead.reviewCount ?? lead.websiteReviewCount ?? 0} reviews
-                </div>
-              </TableCell>
-              <TableCell className='whitespace-normal'>
-                <div>{lead.phone ?? 'No phone'}</div>
-                <div className='text-xs text-muted-foreground'>
-                  {lead.email ?? 'No email'}
-                </div>
-              </TableCell>
-              <TableCell className='whitespace-normal'>
-                {person ? (
-                  <>
-                    <div className='flex items-center gap-1 font-medium'>
-                      <UserRound className='size-3.5' />
-                      {person.name}
-                    </div>
-                    <div className='text-xs text-muted-foreground'>
-                      {person.role}
-                    </div>
-                    {person.email ? (
-                      <div className='flex items-center gap-1 text-xs text-primary'>
-                        <Mail className='size-3' />
-                        {person.email}
+    <>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className='w-12'>
+              <Checkbox
+                checked={allVisibleSelected}
+                onCheckedChange={(checked) => onToggleVisible(Boolean(checked))}
+                aria-label='Select all visible leads'
+              />
+            </TableHead>
+            <TableHead>Company</TableHead>
+            <TableHead>Segment</TableHead>
+            <TableHead>Proof</TableHead>
+            <TableHead>Contact</TableHead>
+            <TableHead>Key person</TableHead>
+            <TableHead>Score</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {leads.map((lead) => {
+            const person =
+              lead.keyPeople?.find((candidate) => candidate.status === 'ready_for_outreach') ??
+              lead.keyPeople?.[0]
+            const prospectRow = prospectByCompanyId?.get(lead.id) ?? {
+              id: `prospect-${lead.id}`,
+              status: lead.outreachStatus ?? 'new',
+              fit_score: lead.leadQualityScore,
+              contact_status: lead.outreachStatus,
+              service_query: lead.sources?.join(', '),
+              area_query: lead.location ?? lead.address,
+            }
+            const simplifiedStatus = simplifiedProspectStatus(prospectRow.status ?? lead.outreachStatus)
+            const prospectRowForEdit = { ...prospectRow, status: simplifiedStatus }
+            const relatedPeople = relatedPeopleByCompanyId?.get(lead.id) ?? []
+            return (
+              <TableRow
+                key={lead.id}
+                className='cursor-pointer'
+                onClick={() => setSelectedCompany({ lead, prospect: prospectRowForEdit, people: relatedPeople })}
+              >
+                <TableCell onClick={(event) => event.stopPropagation()}>
+                  <Checkbox
+                    checked={selectedIds.includes(lead.id)}
+                    onCheckedChange={(checked) => onToggleLead(lead.id, Boolean(checked))}
+                    aria-label={`Select ${lead.companyName}`}
+                  />
+                </TableCell>
+                <TableCell className='min-w-[260px] whitespace-normal'>
+                  <div className='font-medium'>{lead.companyName}</div>
+                  <div className='text-xs text-muted-foreground'>{lead.website}</div>
+                </TableCell>
+                <TableCell className='min-w-[180px] whitespace-normal'>
+                  <div className='font-medium'>{String(prospectRow.service_query ?? 'No service')}</div>
+                  <div className='text-xs text-muted-foreground'>{String(prospectRow.area_query ?? 'No area')}</div>
+                </TableCell>
+                <TableCell>
+                  {lead.rating ?? lead.websiteRating ?? 'N/A'} stars
+                  <div className='text-xs text-muted-foreground'>
+                    {lead.reviewCount ?? lead.websiteReviewCount ?? 0} reviews
+                  </div>
+                </TableCell>
+                <TableCell className='whitespace-normal'>
+                  <div>{lead.phone ?? 'No phone'}</div>
+                  <div className='text-xs text-muted-foreground'>
+                    {lead.email ?? 'No email'}
+                  </div>
+                </TableCell>
+                <TableCell className='whitespace-normal'>
+                  {person ? (
+                    <>
+                      <div className='flex items-center gap-1 font-medium'>
+                        <UserRound className='size-3.5' />
+                        {person.name}
                       </div>
-                    ) : null}
-                  </>
-                ) : (
-                  <span className='text-muted-foreground'>No key person</span>
-                )}
-              </TableCell>
-              <TableCell>
-                <div className='text-lg font-semibold'>{lead.leadQualityScore ?? 0}</div>
-              </TableCell>
-              <TableCell>
-                <Badge variant='secondary'>
-                  {String(prospectRow.status ?? lead.outreachStatus ?? 'new')}
-                </Badge>
-              </TableCell>
-              <TableCell>
-                <RowCrudActions
-                  row={prospectRow}
-                  fields={prospectFields ?? prospectCrudFields}
-                  onUpdate={onUpdateProspect}
-                  onDelete={onDeleteProspect}
-                />
-              </TableCell>
-            </TableRow>
-          )
-        })}
-      </TableBody>
-    </Table>
+                      <div className='text-xs text-muted-foreground'>
+                        {person.role}
+                      </div>
+                      {person.source === 'apollo' && !person.email ? (
+                        <div className='text-xs text-muted-foreground'>
+                          Apollo candidate, email not revealed
+                        </div>
+                      ) : null}
+                      {person.email ? (
+                        <div className='flex items-center gap-1 text-xs text-primary'>
+                          <Mail className='size-3' />
+                          {person.email}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <span className='text-muted-foreground'>No key person</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <div className='text-lg font-semibold'>{lead.leadQualityScore ?? 0}</div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant='secondary'>
+                    {titleize(simplifiedStatus)}
+                  </Badge>
+                </TableCell>
+                <TableCell onClick={(event) => event.stopPropagation()}>
+                  <RowCrudActions
+                    row={prospectRowForEdit}
+                    fields={prospectFields ?? prospectCrudFields}
+                    onUpdate={onUpdateProspect}
+                    onDelete={onDeleteProspect}
+                  />
+                </TableCell>
+              </TableRow>
+            )
+          })}
+        </TableBody>
+      </Table>
+      <CompanyDetailDialog
+        open={Boolean(selectedCompany)}
+        company={selectedCompany?.lead}
+        prospect={selectedCompany?.prospect}
+        people={selectedCompany?.people ?? []}
+        prospectFields={prospectFields ?? prospectCrudFields}
+        onOpenChange={(open) => {
+          if (!open) setSelectedCompany(null)
+        }}
+        onUpdateCompany={onUpdateCompany}
+        onUpdateProspect={onUpdateProspect}
+        onDeleteProspect={onDeleteProspect}
+      />
+    </>
   )
 }
 
@@ -3019,11 +3884,13 @@ function RowCrudActions({
   fields,
   onUpdate,
   onDelete,
+  compact = false,
 }: {
   row: Record<string, unknown>
   fields: CrudField[]
   onUpdate?: (id: string, payload: Record<string, unknown>) => void
   onDelete?: (id: string) => void
+  compact?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState<Record<string, string>>(() =>
@@ -3042,9 +3909,9 @@ function RowCrudActions({
       {onUpdate ? (
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
-            <Button type='button' variant='secondary' size='sm'>
+            <Button type='button' variant='secondary' size='sm' className={compact ? 'h-8 px-2 text-xs' : undefined}>
               <Pencil className='size-3.5' />
-              Edit
+              {compact ? null : 'Edit'}
             </Button>
           </DialogTrigger>
           <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-2xl'>
@@ -3240,80 +4107,482 @@ function CompaniesTable({
   )
 }
 
+function companyEditRow(company: CompanyLead): Record<string, unknown> {
+  return {
+    id: company.id,
+    company_name: company.companyName,
+    website: company.website,
+    phone: company.phone,
+    email: company.email,
+    address: company.address ?? company.location,
+    rating: company.rating ?? company.websiteRating,
+    review_count: company.reviewCount ?? company.websiteReviewCount,
+    company_summary: company.companySummary,
+  }
+}
+
+function CompanyDetailDialog({
+  open,
+  company,
+  prospect,
+  people,
+  prospectFields,
+  onOpenChange,
+  onUpdateCompany,
+  onUpdateProspect,
+  onDeleteProspect,
+}: {
+  open: boolean
+  company?: CompanyLead
+  prospect?: Record<string, unknown>
+  people: Array<Record<string, unknown>>
+  prospectFields: CrudField[]
+  onOpenChange: (open: boolean) => void
+  onUpdateCompany?: (id: string, payload: Record<string, unknown>) => void
+  onUpdateProspect?: (id: string, payload: Record<string, unknown>) => void
+  onDeleteProspect?: (id: string) => void
+}) {
+  if (!company) return null
+  const companyRow = companyEditRow(company)
+  const prospectRow = prospect ?? { id: `prospect-${company.id}`, status: 'new' }
+  const status = titleize(simplifiedProspectStatus(prospectRow.status))
+  const rating = company.rating ?? company.websiteRating
+  const reviews = company.reviewCount ?? company.websiteReviewCount
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className='max-h-[92vh] overflow-y-auto p-0 sm:max-w-6xl'>
+        <DialogHeader className='border-b px-6 py-5 text-left'>
+          <div className='flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between'>
+            <div className='flex gap-4'>
+              <div className='flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary'>
+                <Building2 className='size-6' />
+              </div>
+              <div className='min-w-0 space-y-2'>
+                <DialogTitle className='text-2xl'>{company.companyName}</DialogTitle>
+                <DialogDescription className='text-sm'>
+                  Company, prospect status, and related people in one record view.
+                </DialogDescription>
+                <div className='flex flex-wrap gap-2'>
+                  <Badge>{status}</Badge>
+                  {prospectRow.service_query ? <Badge variant='secondary'>{String(prospectRow.service_query)}</Badge> : null}
+                  {prospectRow.area_query ? <Badge variant='outline'>{String(prospectRow.area_query)}</Badge> : null}
+                  {rating ? (
+                    <Badge variant='outline' className='gap-1'>
+                      <Star className='size-3' />
+                      {String(rating)} {reviews ? `(${reviews})` : ''}
+                    </Badge>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+            <div className='grid gap-2 text-sm text-muted-foreground lg:min-w-[260px]'>
+              <div className='flex items-start gap-2'>
+                <MapPin className='mt-0.5 size-4 shrink-0' />
+                <span className='break-words'>{formatDetailValue(company.address ?? company.location)}</span>
+              </div>
+              <div className='flex items-center gap-2'>
+                <Mail className='size-4 shrink-0' />
+                <span className='break-words'>{formatDetailValue(company.email ?? company.phone)}</span>
+              </div>
+            </div>
+          </div>
+        </DialogHeader>
+
+        <Tabs defaultValue='overview' className='px-6 pb-6 pt-4'>
+          <TabsList className='grid w-full grid-cols-4 lg:w-auto'>
+            <TabsTrigger value='overview'>Overview</TabsTrigger>
+            <TabsTrigger value='people'>People</TabsTrigger>
+            <TabsTrigger value='edit'>Edit</TabsTrigger>
+            <TabsTrigger value='technical'>Technical</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value='overview' className='mt-4 space-y-4'>
+            <div className='grid gap-4 xl:grid-cols-2'>
+              <DetailSection title='Company profile'>
+                <DetailGrid
+                  rows={[
+                    ['Name', company.companyName],
+                    ['Website', company.website],
+                    ['Phone', company.phone],
+                    ['Email', company.email],
+                    ['Address', company.address ?? company.location],
+                    ['Source', company.sources],
+                    ['Rating', rating],
+                    ['Reviews', reviews],
+                    ['Summary status', company.summaryStatus],
+                  ]}
+                />
+              </DetailSection>
+
+              <DetailSection title='Prospect relationship'>
+                <DetailGrid
+                  rows={[
+                    ['Status', status],
+                    ['Service', prospectRow.service_query],
+                    ['Area', prospectRow.area_query],
+                    ['Fit score', prospectRow.fit_score],
+                    ['Contact status', prospectRow.contact_status],
+                    ['Min reviews matched', prospectRow.min_reviews_matched],
+                  ]}
+                />
+              </DetailSection>
+            </div>
+
+            <DetailSection title='Summary'>
+              <p className='text-sm leading-6 text-muted-foreground'>
+                {company.companySummary ?? 'No company summary has been generated yet.'}
+              </p>
+            </DetailSection>
+          </TabsContent>
+
+          <TabsContent value='people' className='mt-4'>
+            <DetailSection title={`Related people (${people.length})`}>
+              {people.length === 0 ? (
+                <EmptyDetailState icon={UserRound} message='No people connected to this company yet.' />
+              ) : (
+                <div className='grid gap-3 md:grid-cols-2'>
+                  {people.map((person) => (
+                    <div key={String(person.id)} className='rounded-xl border bg-muted/20 p-4'>
+                      <div className='flex items-start justify-between gap-3'>
+                        <div className='min-w-0'>
+                          <div className='font-medium'>{String(person.name ?? 'Unnamed person')}</div>
+                          <div className='text-sm text-muted-foreground'>{formatDetailValue(person.role)}</div>
+                        </div>
+                        {person.status ? <Badge variant='secondary'>{titleize(String(person.status))}</Badge> : null}
+                      </div>
+                      <div className='mt-3 space-y-1 text-sm text-muted-foreground'>
+                        <div className='break-words'>{formatDetailValue(person.email)}</div>
+                        <div className='break-words'>{formatDetailValue(person.linkedin_url)}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </DetailSection>
+          </TabsContent>
+
+          <TabsContent value='edit' className='mt-4'>
+            <div className='grid gap-4 lg:grid-cols-2'>
+              <DetailSection title='Company fields'>
+                <p className='text-sm text-muted-foreground'>Update the company data shown in the CRM table.</p>
+                <RowCrudActions row={companyRow} fields={companyCrudFields} onUpdate={onUpdateCompany} />
+              </DetailSection>
+              <DetailSection title='Prospect fields'>
+                <p className='text-sm text-muted-foreground'>Update prospect status, service, area, and qualification fields.</p>
+                <RowCrudActions
+                  row={prospectRow}
+                  fields={prospectFields}
+                  onUpdate={onUpdateProspect}
+                  onDelete={onDeleteProspect}
+                />
+              </DetailSection>
+            </div>
+          </TabsContent>
+
+          <TabsContent value='technical' className='mt-4'>
+            <DetailSection title='Raw record'>
+              <p className='text-sm text-muted-foreground'>
+                Technical payload for debugging. Hidden from the main view so the modal stays readable.
+              </p>
+              <pre className='max-h-[420px] overflow-auto rounded-lg bg-muted p-4 text-xs'>
+                {JSON.stringify({ company, prospect: prospectRow, people }, null, 2)}
+              </pre>
+            </DetailSection>
+          </TabsContent>
+        </Tabs>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function PersonDetailDialog({
+  open,
+  person,
+  prospect,
+  fields,
+  statusOptions,
+  onOpenChange,
+  onStatusChange,
+  onUpdate,
+  onDelete,
+}: {
+  open: boolean
+  person: Record<string, unknown> | null
+  prospect?: Record<string, unknown>
+  fields: CrudField[]
+  statusOptions: string[]
+  onOpenChange: (open: boolean) => void
+  onStatusChange?: (id: string, status: string) => void
+  onUpdate?: (id: string, payload: Record<string, unknown>) => void
+  onDelete?: (id: string) => void
+}) {
+  if (!person) return null
+  const status = String(person.status ?? statusOptions[0])
+  const prospectStatus = prospect ? titleize(simplifiedProspectStatus(prospect.status)) : undefined
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className='max-h-[92vh] overflow-y-auto p-0 sm:max-w-5xl'>
+        <DialogHeader className='border-b px-6 py-5 text-left'>
+          <div className='flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between'>
+            <div className='flex gap-4'>
+              <div className='flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary'>
+                <UserRound className='size-6' />
+              </div>
+              <div className='min-w-0 space-y-2'>
+                <DialogTitle className='text-2xl'>{String(person.name ?? 'Contact')}</DialogTitle>
+                <DialogDescription>
+                  Contact details, linked company, and prospect relationship.
+                </DialogDescription>
+                <div className='flex flex-wrap gap-2'>
+                  <Badge>{titleize(status)}</Badge>
+                  {person.role ? <Badge variant='secondary'>{String(person.role)}</Badge> : null}
+                  {prospectStatus ? <Badge variant='outline'>Prospect: {prospectStatus}</Badge> : null}
+                </div>
+              </div>
+            </div>
+            <div className='grid gap-2 text-sm text-muted-foreground lg:min-w-[280px]'>
+              <div className='flex items-center gap-2'>
+                <Building2 className='size-4 shrink-0' />
+                <span className='break-words'>{formatDetailValue(person.company_name)}</span>
+              </div>
+              <div className='flex items-center gap-2'>
+                <Mail className='size-4 shrink-0' />
+                <span className='break-words'>{formatDetailValue(person.email)}</span>
+              </div>
+            </div>
+          </div>
+        </DialogHeader>
+
+        <Tabs defaultValue='overview' className='px-6 pb-6 pt-4'>
+          <TabsList className='grid w-full grid-cols-3 lg:w-auto'>
+            <TabsTrigger value='overview'>Overview</TabsTrigger>
+            <TabsTrigger value='edit'>Edit</TabsTrigger>
+            <TabsTrigger value='technical'>Technical</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value='overview' className='mt-4'>
+            <div className='grid gap-4 xl:grid-cols-2'>
+              <DetailSection title='Person data'>
+                <DetailGrid
+                  rows={[
+                    ['Name', person.name],
+                    ['Role', person.role],
+                    ['Email', person.email],
+                    ['Email confidence', person.email_confidence],
+                    ['LinkedIn', person.linkedin_url],
+                    ['Source', person.source],
+                    ['Status', status],
+                  ]}
+                />
+              </DetailSection>
+
+              <DetailSection title='Company relationship'>
+                <DetailGrid
+                  rows={[
+                    ['Company', person.company_name],
+                    ['Website', person.website],
+                    ['Company ID', person.company_id],
+                    ['Prospect status', prospectStatus],
+                    ['Service', prospect?.service_query],
+                    ['Area', prospect?.area_query],
+                  ]}
+                />
+              </DetailSection>
+            </div>
+          </TabsContent>
+
+          <TabsContent value='edit' className='mt-4'>
+            <DetailSection title='Edit contact'>
+              <div className='space-y-4'>
+                {onStatusChange ? (
+                  <Field label='Status'>
+                    <StatusSelect
+                      value={status}
+                      options={statusOptions}
+                      onChange={(nextStatus) => onStatusChange(String(person.id), nextStatus)}
+                    />
+                  </Field>
+                ) : null}
+                <RowCrudActions row={person} fields={fields} onUpdate={onUpdate} onDelete={onDelete} />
+              </div>
+            </DetailSection>
+          </TabsContent>
+
+          <TabsContent value='technical' className='mt-4'>
+            <DetailSection title='Raw record'>
+              <p className='text-sm text-muted-foreground'>
+                Technical payload for debugging. Hidden from the main view so the modal stays readable.
+              </p>
+              <pre className='max-h-[420px] overflow-auto rounded-lg bg-muted p-4 text-xs'>
+                {JSON.stringify({ person, prospect }, null, 2)}
+              </pre>
+            </DetailSection>
+          </TabsContent>
+        </Tabs>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function DetailSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className='space-y-3 rounded-xl border bg-background p-4 shadow-sm'>
+      <h3 className='font-semibold'>{title}</h3>
+      {children}
+    </section>
+  )
+}
+
+function DetailGrid({ rows }: { rows: Array<[string, unknown]> }) {
+  return (
+    <div className='grid gap-3 md:grid-cols-2'>
+      {rows.map(([label, value]) => (
+        <div key={label} className='min-w-0 rounded-lg border bg-muted/20 p-3'>
+          <div className='text-xs font-medium uppercase tracking-wide text-muted-foreground'>{label}</div>
+          <div className='mt-1 break-words text-sm font-medium leading-6'>{formatDetailValue(value)}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function EmptyDetailState({ icon: Icon, message }: { icon: ElementType; message: string }) {
+  return (
+    <div className='flex min-h-32 flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/20 p-6 text-center text-sm text-muted-foreground'>
+      <Icon className='size-6' />
+      {message}
+    </div>
+  )
+}
+
+function formatDetailValue(value: unknown) {
+  if (value === null || value === undefined || value === '') return 'Not set'
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (Array.isArray(value)) return value.join(', ')
+  return String(value)
+}
+
 function PeopleTable({
   people,
   onStatusChange,
+  onRevealApolloEmail,
+  revealingPersonId,
   onUpdate,
   onDelete,
   statusOptions = personStatuses,
   crudFields = peopleCrudFields,
+  prospectByCompanyId,
 }: {
   people: Array<Record<string, unknown>>
   onStatusChange?: (id: string, status: string) => void
+  onRevealApolloEmail?: (id: string) => void
+  revealingPersonId?: string
   onUpdate?: (id: string, payload: Record<string, unknown>) => void
   onDelete?: (id: string) => void
   statusOptions?: string[]
   crudFields?: CrudField[]
+  prospectByCompanyId?: Map<string, Record<string, unknown>>
 }) {
+  const [selectedPerson, setSelectedPerson] = useState<Record<string, unknown> | null>(null)
+  const selectedProspect = selectedPerson
+    ? prospectByCompanyId?.get(String(selectedPerson.company_id ?? ''))
+    : undefined
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Name</TableHead>
-          <TableHead>Company</TableHead>
-          <TableHead>Role</TableHead>
-          <TableHead>Email</TableHead>
-          <TableHead>Source</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Actions</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {people.map((person) => (
-          <TableRow key={String(person.id)}>
-            <TableCell className='min-w-[220px] whitespace-normal'>
-              <div className='flex items-center gap-2 font-medium'>
-                <UserRound className='size-4' />
-                {String(person.name ?? '')}
-              </div>
-              {person.linkedin_url ? (
-                <div className='text-xs text-primary'>{String(person.linkedin_url)}</div>
-              ) : null}
-            </TableCell>
-            <TableCell className='whitespace-normal'>
-              <div>{String(person.company_name ?? '')}</div>
-              <div className='text-xs text-muted-foreground'>{String(person.website ?? '')}</div>
-            </TableCell>
-            <TableCell>{String(person.role ?? '')}</TableCell>
-            <TableCell className='whitespace-normal'>
-              <div>{String(person.email ?? '')}</div>
-              {person.email_confidence ? (
-                <div className='text-xs text-muted-foreground'>
-                  {String(person.email_confidence)}
-                </div>
-              ) : null}
-            </TableCell>
-            <TableCell>
-              <Badge variant='outline'>{String(person.source ?? 'website')}</Badge>
-            </TableCell>
-            <TableCell>
-              {onStatusChange ? (
-                <StatusSelect
-                  value={String(person.status ?? 'needs_email')}
-                  options={statusOptions}
-                  onChange={(status) => onStatusChange(String(person.id), status)}
-                />
-              ) : (
-                <Badge>{String(person.status ?? 'found')}</Badge>
-              )}
-            </TableCell>
-            <TableCell>
-              <RowCrudActions row={person} fields={crudFields} onUpdate={onUpdate} onDelete={onDelete} />
-            </TableCell>
+    <>
+      <Table className='table-fixed'>
+        <TableHeader>
+          <TableRow>
+            <TableHead className='w-[30%]'>Contact</TableHead>
+            <TableHead className='w-[24%]'>Company</TableHead>
+            <TableHead className='w-[30%]'>Email & state</TableHead>
+            <TableHead className='w-[16%] text-right'>Actions</TableHead>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {people.map((person) => (
+            <TableRow
+              key={String(person.id)}
+              className='cursor-pointer'
+              onClick={() => setSelectedPerson(person)}
+            >
+              <TableCell className='whitespace-normal'>
+                <div className='flex items-center gap-2 font-medium'>
+                  <UserRound className='size-4' />
+                  <span className='min-w-0 break-words'>{String(person.name ?? '')}</span>
+                </div>
+                {person.role ? (
+                  <div className='mt-1 break-words text-xs text-muted-foreground'>{String(person.role)}</div>
+                ) : null}
+                {person.linkedin_url ? (
+                  <div className='truncate text-xs text-primary'>{String(person.linkedin_url)}</div>
+                ) : null}
+              </TableCell>
+              <TableCell className='whitespace-normal'>
+                <div className='break-words font-medium'>{String(person.company_name ?? '')}</div>
+              </TableCell>
+              <TableCell className='whitespace-normal'>
+                <div className='break-words font-medium'>{String(person.email ?? '') || 'No email revealed'}</div>
+                {person.email_confidence ? (
+                  <div className='text-xs text-muted-foreground'>
+                    {String(person.email_confidence)}
+                  </div>
+                ) : null}
+                <div className='mt-2 flex flex-wrap items-center gap-2' onClick={(event) => event.stopPropagation()}>
+                  <Badge variant='outline'>{String(person.source ?? 'website')}</Badge>
+                  {onStatusChange ? (
+                    <StatusSelect
+                      value={String(person.status ?? 'needs_email')}
+                      options={statusOptions}
+                      onChange={(status) => onStatusChange(String(person.id), status)}
+                    />
+                  ) : (
+                    <Badge>{String(person.status ?? 'found')}</Badge>
+                  )}
+                </div>
+              </TableCell>
+              <TableCell className='text-right' onClick={(event) => event.stopPropagation()}>
+                <div className='flex flex-col items-end gap-2'>
+                  {person.source === 'apollo' && !person.email ? (
+                    <Button
+                      type='button'
+                      size='sm'
+                      variant='secondary'
+                      className='h-8 px-2 text-xs'
+                      disabled={!onRevealApolloEmail || revealingPersonId === String(person.id)}
+                      onClick={() => onRevealApolloEmail?.(String(person.id))}
+                    >
+                      {revealingPersonId === String(person.id) ? (
+                        <LoaderCircle className='size-3.5 animate-spin' />
+                      ) : (
+                        <Mail className='size-3.5' />
+                      )}
+                      <span className='hidden sm:inline'>Reveal</span>
+                    </Button>
+                  ) : null}
+                  <RowCrudActions row={person} fields={crudFields} onUpdate={onUpdate} onDelete={onDelete} compact />
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <PersonDetailDialog
+        open={Boolean(selectedPerson)}
+        person={selectedPerson}
+        prospect={selectedProspect}
+        fields={crudFields}
+        statusOptions={statusOptions}
+        onOpenChange={(open) => {
+          if (!open) setSelectedPerson(null)
+        }}
+        onStatusChange={onStatusChange}
+        onUpdate={onUpdate}
+        onDelete={onDelete}
+      />
+    </>
   )
 }
 
@@ -3579,6 +4848,8 @@ function filterLeads(leads: CompanyLead[], filters: LeadFilters) {
 function filterPeople(people: Array<Record<string, unknown>>, filters: PeopleFilters) {
   const search = filters.search.trim().toLowerCase()
   return people.filter((person) => {
+    const payload = person.payload_json as Record<string, unknown> | undefined
+    const category = String(payload?.category ?? person.category ?? 'person')
     const text = [
       person.name,
       person.company_name,
@@ -3598,6 +4869,7 @@ function filterPeople(people: Array<Record<string, unknown>>, filters: PeopleFil
     if (filters.source !== 'all' && person.source !== filters.source) return false
     if (filters.email === 'has_email' && !person.email) return false
     if (filters.email === 'missing_email' && person.email) return false
+    if (filters.category !== 'all' && category !== filters.category) return false
     return true
   })
 }

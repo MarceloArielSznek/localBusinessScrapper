@@ -12,6 +12,7 @@ import {
   convertProspectToLeadInPostgres,
   createDemoInPostgres,
   createManualLeadInPostgres,
+  createSearchCampaignInPostgres,
   createNoteInPostgres,
   createOpportunityInPostgres,
   createTaskInPostgres,
@@ -22,6 +23,8 @@ import {
   listActivitiesFromPostgres,
   listCrmExportRows,
   listCrmOptionsFromPostgres,
+  listSearchCampaignItemsFromPostgres,
+  listSearchCampaignsFromPostgres,
   listCompaniesFromPostgres,
   listCompanyLeadsByIds,
   listCrmLeadsFromPostgres,
@@ -33,6 +36,13 @@ import {
   listRunsFromPostgres,
   listTasksFromPostgres,
   listWebhookSourcesFromPostgres,
+  markQueuedSearchCampaignItemsSkipped,
+  markSearchCampaignComplete,
+  markSearchCampaignFailed,
+  markSearchCampaignItemComplete,
+  markSearchCampaignItemFailed,
+  markSearchCampaignItemRunning,
+  markSearchCampaignRunning,
   processWebhookLeadInPostgres,
   saveRunToPostgres,
   updateCompanyLeadInPostgres,
@@ -43,8 +53,9 @@ import {
   upsertCrmOptionInPostgres,
 } from "./db/postgres.js";
 import { enrichCompanyLeadIntelligence, type EnrichmentTask } from "./enrichers/companyIntelligenceEnricher.js";
+import { findApolloPeopleCandidates, revealApolloEmail } from "./enrichers/apolloPeopleClient.js";
 import { exportLeads } from "./exporters/exportLeads.js";
-import type { CompanyLead, ContactDiscoveryConfig, ManualLeadInput, OpportunityStage, ProspectConversionInput, ScraperInput, TaskStatus } from "./types.js";
+import type { CompanyLead, ContactDiscoveryConfig, KeyPersonContact, ManualLeadInput, OpportunityStage, ProspectConversionInput, ScraperInput, TaskStatus } from "./types.js";
 
 const port = Number(process.env.API_PORT ?? 3333);
 const workspaceRoot = process.cwd();
@@ -96,6 +107,16 @@ interface EnrichSelectedBody {
   contactConfig?: ContactDiscoveryConfig;
 }
 
+interface ApolloPeopleSearchBody {
+  leadIds?: string[];
+  onlyDecisionMakers?: boolean;
+  refresh?: boolean;
+}
+
+interface ApolloEmailRevealBody {
+  personId?: string;
+}
+
 interface JobLogEntry {
   id: string;
   level: JobLogLevel;
@@ -126,6 +147,17 @@ type ScrapeRequestBody = Partial<ScraperInput> & {
   autoEnrich?: boolean;
   services?: string[];
   areas?: string[];
+};
+
+type SearchCampaignRequestBody = Partial<ScraperInput> & {
+  name?: string;
+  autoEnrich?: boolean;
+  services?: string[];
+  areas?: string[];
+  serviceGroups?: Array<{ name: string; items: string[]; state?: string }>;
+  areaGroups?: Array<{ name: string; items: string[]; state?: string }>;
+  totalTarget?: number;
+  targetPerSearch?: number;
 };
 
 const jobs = new Map<string, Job>();
@@ -238,6 +270,34 @@ function listInputValues(primary: unknown, batch: unknown): string[] {
   return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
 }
 
+function campaignInputFor(body: SearchCampaignRequestBody) {
+  const services = listInputValues(body.service, body.services);
+  const areas = listInputValues(body.area, body.areas);
+  const totalSearches = services.length * areas.length;
+  const targetPerSearch = Math.max(1, Math.min(100000, Math.round(body.targetPerSearch ?? body.targetCount ?? 100)));
+  const totalTarget = Math.max(1, Math.round(body.totalTarget ?? targetPerSearch * Math.max(totalSearches, 1)));
+
+  return {
+    name: body.name,
+    services,
+    areas,
+    serviceGroups: body.serviceGroups,
+    areaGroups: body.areaGroups,
+    totalTarget,
+    targetPerSearch,
+    minReviews: body.minReviews,
+    minRating: body.minRating,
+    maxPagesPerSource: body.maxPagesPerSource ?? 5,
+    includeServiceAreaBusinesses: body.includeServiceAreaBusinesses ?? true,
+    openNow: body.openNow ?? false,
+    rankPreference: body.rankPreference ?? "RELEVANCE",
+    autoEnrich: false,
+    address: body.address || undefined,
+    radiusMiles: body.address ? body.radiusMiles : undefined,
+    delayMs: body.delayMs ?? 1200,
+  };
+}
+
 function hiddenOutputDir(): string {
   return "output/db-cache";
 }
@@ -287,6 +347,46 @@ function primaryPerson(lead: CompanyLead) {
     lead.keyPeople?.find((person) => person.status === "ready_for_outreach") ??
     lead.keyPeople?.[0]
   );
+}
+
+function contactKey(person: KeyPersonContact): string {
+  return person.apolloPersonId
+    ? `apollo:${person.apolloPersonId}`
+    : `${person.source}:${person.name.toLowerCase()}:${(person.role ?? "").toLowerCase()}`;
+}
+
+function sortContacts(people: KeyPersonContact[]): KeyPersonContact[] {
+  return people.sort((a, b) => {
+    if (a.status === "ready_for_outreach" && b.status !== "ready_for_outreach") return -1;
+    if (b.status === "ready_for_outreach" && a.status !== "ready_for_outreach") return 1;
+    const roleDelta = (b.roleFitScore ?? 0) - (a.roleFitScore ?? 0);
+    if (roleDelta !== 0) return roleDelta;
+    return (a.role ?? "").localeCompare(b.role ?? "") || a.name.localeCompare(b.name);
+  });
+}
+
+function mergeLeadContacts(existing: KeyPersonContact[] = [], incoming: KeyPersonContact[] = []): KeyPersonContact[] {
+  const contacts = new Map<string, KeyPersonContact>();
+  for (const person of [...existing, ...incoming]) {
+    const key = contactKey(person);
+    const previous = contacts.get(key);
+    contacts.set(key, {
+      ...previous,
+      ...person,
+      email: previous?.email ?? person.email,
+      emailConfidence: previous?.emailConfidence ?? person.emailConfidence,
+      status: previous?.status === "ready_for_outreach" ? previous.status : person.status,
+      revealStatus: previous?.revealStatus === "revealed" ? previous.revealStatus : person.revealStatus,
+    });
+  }
+
+  return sortContacts([...contacts.values()]);
+}
+
+function contactNotes(lead: CompanyLead, foundCount: number): string {
+  const apolloCount = lead.keyPeople?.filter((person) => person.source === "apollo").length ?? 0;
+  const readyCount = lead.keyPeople?.filter((person) => person.status === "ready_for_outreach").length ?? 0;
+  return `Apollo free people search found ${foundCount} candidate(s). ${apolloCount} Apollo candidate(s) are saved for review; ${readyCount} contact(s) currently have an outreach-ready email or LinkedIn signal. Reveal emails only for selected high-fit roles to control credits.`;
 }
 
 function matchesLeadFilters(lead: CompanyLead, filters: LeadFiltersBody = {}): boolean {
@@ -656,6 +756,17 @@ async function handleGet(reqUrl: URL, res: ServerResponse): Promise<void> {
     return;
   }
 
+  if (reqUrl.pathname === "/api/search-campaigns") {
+    json(res, 200, { campaigns: await listSearchCampaignsFromPostgres() });
+    return;
+  }
+
+  const campaignItemsMatch = reqUrl.pathname.match(/^\/api\/search-campaigns\/([^/]+)\/items$/);
+  if (campaignItemsMatch) {
+    json(res, 200, { items: await listSearchCampaignItemsFromPostgres(decodeURIComponent(campaignItemsMatch[1])) });
+    return;
+  }
+
   if (reqUrl.pathname === "/api/db/companies") {
     json(res, 200, { companies: await listCompaniesFromPostgres(reqUrl.searchParams.get("runId") ?? undefined) });
     return;
@@ -907,6 +1018,128 @@ async function handlePost(reqUrl: URL, req: IncomingMessage, res: ServerResponse
     return;
   }
 
+  if (reqUrl.pathname === "/api/search-campaigns") {
+    if (!isPostgresConfigured()) {
+      json(res, 500, { error: "DATABASE_URL is required. Search campaigns save to Postgres." });
+      return;
+    }
+
+    const body = await readJsonBody<SearchCampaignRequestBody>(req);
+    const campaignInput = campaignInputFor(body);
+    if (campaignInput.services.length === 0 || campaignInput.areas.length === 0) {
+      json(res, 400, { error: "At least one service and one area are required." });
+      return;
+    }
+
+    const campaign = await createSearchCampaignInPostgres(campaignInput);
+    const items = await listSearchCampaignItemsFromPostgres(campaign.id);
+    const job = newJob("scrape", `Queued campaign ${campaign.name} (${campaign.totalSearches} searches, target ${campaign.totalTarget})`);
+    updateJob(job, "running", `Queued campaign ${campaign.name}`, {
+      progress: 1,
+      currentStep: "Queued campaign",
+      totalItems: items.length,
+    });
+    appendJobLog(job, "info", `Services: ${campaign.services.join(", ")}`);
+    appendJobLog(job, "info", `Areas: ${campaign.areas.join(", ")}`);
+    appendJobLog(job, "info", `Target: ${campaign.totalTarget} unique companies; per search: ${campaign.targetPerSearch}`);
+    json(res, 202, { campaign, job });
+
+    void (async () => {
+      await markSearchCampaignRunning(campaign.id);
+      const uniqueCompanyIds = new Set<string>();
+      let returned = 0;
+
+      for (let index = 0; index < items.length; index += 1) {
+        if (uniqueCompanyIds.size >= campaign.totalTarget) {
+          await markQueuedSearchCampaignItemsSkipped(campaign.id, `Campaign target of ${campaign.totalTarget} unique companies reached.`);
+          appendJobLog(job, "success", `Campaign target reached with ${uniqueCompanyIds.size} unique companies.`);
+          break;
+        }
+
+        const item = items[index];
+        const itemId = String(item.id);
+        const service = String(item.service);
+        const area = String(item.area);
+        const location = campaignInput.address && campaignInput.radiusMiles
+          ? `${campaignInput.radiusMiles} miles from ${campaignInput.address}`
+          : area;
+        await markSearchCampaignItemRunning(itemId);
+        updateJob(job, "running", `Searching ${service} in ${location}`, {
+          progress: (index / Math.max(items.length, 1)) * 90 + 5,
+          currentStep: `Campaign search ${index + 1}/${items.length}: ${service} in ${location}`,
+          processedItems: index,
+          totalItems: items.length,
+        });
+        appendJobLog(job, "info", `Started campaign search ${index + 1}/${items.length}: ${service} in ${location}`);
+
+        try {
+          const input = validateInput({
+            ...body,
+            service,
+            area,
+            address: campaignInput.address,
+            radiusMiles: campaignInput.address ? campaignInput.radiusMiles : undefined,
+            targetCount: campaign.targetPerSearch,
+            minReviews: campaignInput.minReviews,
+            minRating: campaignInput.minRating,
+            maxPagesPerSource: campaignInput.maxPagesPerSource,
+            includeServiceAreaBusinesses: campaignInput.includeServiceAreaBusinesses,
+            openNow: campaignInput.openNow,
+            rankPreference: campaignInput.rankPreference,
+            delayMs: campaignInput.delayMs,
+            sources: ["google-places-api"],
+            outputDir: hiddenOutputDir(),
+            apiEnrichment: false,
+            companySummaries: false,
+            fallback: true,
+            headless: true,
+          });
+          const result = await runScraper(input);
+          const jsonOutput = result.outputFiles.find((file) => file.endsWith(".json"));
+          const runId = await saveRunToPostgres(input, result.leads, jsonOutput);
+          for (const lead of result.leads) {
+            uniqueCompanyIds.add(lead.id);
+          }
+          returned += result.stats.returned;
+          await markSearchCampaignItemComplete(itemId, {
+            runId,
+            discovered: result.stats.discovered,
+            unique: result.stats.unique,
+            qualified: result.stats.qualified,
+            saved: result.stats.returned,
+          });
+          appendJobLog(
+            job,
+            "success",
+            `${service} in ${location}: ${result.stats.discovered} discovered, ${result.stats.unique} unique, ${result.stats.returned} saved. Campaign unique: ${uniqueCompanyIds.size}.`,
+          );
+
+          if (campaignInput.autoEnrich && jsonOutput) {
+            const enrichJob = newJob("enrich", `Auto-enriching ${service} in ${location}`);
+            appendJobLog(job, "info", `Started automatic enrichment job ${enrichJob.id}`);
+            void enrichResultFile(jsonOutput, false, enrichJob).catch((error: unknown) => failJob(enrichJob, error));
+          }
+        } catch (error) {
+          await markSearchCampaignItemFailed(itemId, error);
+          appendJobLog(job, "error", `${service} in ${location} failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      updateJob(job, "running", "Finalizing campaign", {
+        progress: 95,
+        currentStep: "Finalizing campaign",
+        processedItems: items.length,
+        totalItems: items.length,
+      });
+      await markSearchCampaignComplete(campaign.id, uniqueCompanyIds.size);
+      completeJob(job, `Campaign complete. Saved ${returned} leads; ${uniqueCompanyIds.size} unique companies in this run.`);
+    })().catch((error: unknown) => {
+      void markSearchCampaignFailed(campaign.id, error);
+      failJob(job, error);
+    });
+    return;
+  }
+
   if (reqUrl.pathname === "/api/scrape") {
     if (!isPostgresConfigured()) {
       json(res, 500, { error: "DATABASE_URL is required. Searches now save to Postgres first." });
@@ -1001,6 +1234,111 @@ async function handlePost(reqUrl: URL, req: IncomingMessage, res: ServerResponse
     const job = newJob("enrich", `Enriching ${body.file}`);
     json(res, 202, { job });
     void enrichResultFile(body.file, Boolean(body.refresh), job).catch((error: unknown) => failJob(job, error));
+    return;
+  }
+
+  if (reqUrl.pathname === "/api/db/apollo-people-search") {
+    if (!isPostgresConfigured()) {
+      json(res, 500, { error: "DATABASE_URL is required for Apollo people search." });
+      return;
+    }
+
+    const body = await readJsonBody<ApolloPeopleSearchBody>(req);
+    const leadIds = [...new Set((body.leadIds ?? []).map((id) => String(id).trim()).filter(Boolean))];
+    if (leadIds.length === 0) {
+      json(res, 400, { error: "Select at least one company to search in Apollo." });
+      return;
+    }
+
+    const job = newJob("enrich", `Queued Apollo people search for ${leadIds.length} compan${leadIds.length === 1 ? "y" : "ies"}`);
+    updateJob(job, "running", "Loading selected companies from Postgres", {
+      progress: 1,
+      currentStep: "Loading selected companies",
+      totalItems: leadIds.length,
+    });
+    json(res, 202, { job });
+
+    void (async () => {
+      const rows = await listCompanyLeadsByIds(leadIds);
+      appendJobLog(job, "info", `Loaded ${rows.length} selected compan${rows.length === 1 ? "y" : "ies"}`);
+      let processed = 0;
+      let saved = 0;
+
+      for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index];
+        const lead = row.payload_json;
+        if (!body.refresh && lead.keyPeople?.some((person) => person.source === "apollo")) {
+          appendJobLog(job, "info", `Skipped ${lead.companyName}: Apollo candidates already saved.`);
+          continue;
+        }
+
+        updateJob(job, "running", `Searching Apollo for ${lead.companyName}`, {
+          progress: (index / Math.max(rows.length, 1)) * 90 + 5,
+          currentStep: `Searching Apollo for ${lead.companyName}`,
+          processedItems: processed,
+          totalItems: rows.length,
+        });
+
+        const candidates = await findApolloPeopleCandidates(lead, Boolean(body.onlyDecisionMakers));
+        const nextLead: CompanyLead = {
+          ...lead,
+          keyPeople: mergeLeadContacts(body.refresh ? lead.keyPeople?.filter((person) => person.source !== "apollo") : lead.keyPeople, candidates),
+        };
+        nextLead.contactDiscoveryNotes = contactNotes(nextLead, candidates.length);
+        nextLead.outreachStatus = nextLead.keyPeople?.some((person) => person.status === "ready_for_outreach") ? "ready_for_outreach" : lead.outreachStatus ?? "needs_contact";
+        await updateCompanyLeadInPostgres(row.run_id, nextLead);
+        processed += 1;
+        saved += candidates.length;
+        appendJobLog(job, candidates.length > 0 ? "success" : "warning", `${lead.companyName}: saved ${candidates.length} Apollo candidate(s).`);
+      }
+
+      completeJob(job, `Apollo people search complete. Processed ${processed} compan${processed === 1 ? "y" : "ies"}; saved ${saved} candidate(s).`);
+    })().catch((error: unknown) => failJob(job, error));
+    return;
+  }
+
+  if (reqUrl.pathname === "/api/db/apollo-email-reveal") {
+    if (!isPostgresConfigured()) {
+      json(res, 500, { error: "DATABASE_URL is required for Apollo email reveal." });
+      return;
+    }
+
+    const body = await readJsonBody<ApolloEmailRevealBody>(req);
+    if (!body.personId) {
+      json(res, 400, { error: "personId is required." });
+      return;
+    }
+
+    const person = (await listPeopleFromPostgres()).find((row) => String(row.id) === body.personId);
+    if (!person) {
+      json(res, 404, { error: "Person not found." });
+      return;
+    }
+    if (String(person.source) !== "apollo") {
+      json(res, 400, { error: "Only Apollo contacts can be revealed through Apollo." });
+      return;
+    }
+
+    const companyId = String(person.company_id);
+    const [row] = await listCompanyLeadsByIds([companyId]);
+    if (!row) {
+      json(res, 404, { error: "Company not found for person." });
+      return;
+    }
+
+    const currentContact = (row.payload_json.keyPeople ?? []).find((candidate) => contactKey(candidate) === contactKey(person.payload_json as KeyPersonContact));
+    const revealed = await revealApolloEmail((currentContact ?? person.payload_json) as KeyPersonContact);
+    const nextLead: CompanyLead = {
+      ...row.payload_json,
+      keyPeople: mergeLeadContacts(
+        (row.payload_json.keyPeople ?? []).filter((candidate) => contactKey(candidate) !== contactKey(revealed)),
+        [revealed],
+      ),
+    };
+    nextLead.contactDiscoveryNotes = contactNotes(nextLead, 1);
+    nextLead.outreachStatus = nextLead.keyPeople?.some((candidate) => candidate.status === "ready_for_outreach") ? "ready_for_outreach" : nextLead.outreachStatus;
+    await updateCompanyLeadInPostgres(row.run_id, nextLead);
+    json(res, 200, { person: revealed });
     return;
   }
 

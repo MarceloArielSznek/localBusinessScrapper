@@ -313,14 +313,338 @@ describe("enrichCompanyIntelligence", () => {
 
     expect(result.keyPeople).toEqual([
       {
-        name: "Company contact",
-        role: "general contact",
+        name: "General Email (Info)",
+        role: "info contact",
         email: "info@316insulationservices.com",
         emailConfidence: "public",
         source: "website",
         status: "ready_for_outreach",
+        category: "general_email",
       },
     ]);
+  });
+
+  it("reveals email via Apollo people/match when Apollo search returns a contact without verified email", async () => {
+    process.env.APOLLO_API_KEY = "test-key";
+    const calls: Array<{ url: string; body?: unknown }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+
+      if (url.includes("mixed_people/api_search")) {
+        return new Response(
+          JSON.stringify({
+            people: [
+              {
+                id: "apollo-person-abc123",
+                first_name: "John",
+                last_name: "Smith",
+                title: "owner",
+                email_status: "likely",
+                linkedin_url: null,
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.includes("people/match")) {
+        return new Response(
+          JSON.stringify({
+            person: {
+              id: "apollo-person-abc123",
+              email: "john@primeroofing.example",
+              email_status: "verified",
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(
+        "<html><body>Prime Roofing provides roof repair.</body></html>",
+        { headers: { "content-type": "text/html" } },
+      );
+    });
+
+    const [result] = await enrichCompanyIntelligence([lead()], true, 0, ["contacts"], false, {
+      allowEmailReveal: true,
+      maxEmailRevealsPerCompany: 1,
+    });
+
+    const matchCall = calls.find((c) => c.url.includes("people/match"));
+    expect(matchCall).toBeDefined();
+    expect(matchCall?.body).toMatchObject({ id: "apollo-person-abc123", reveal_personal_emails: true });
+
+    expect(result.keyPeople?.[0]).toMatchObject({
+      name: "John Smith",
+      email: "john@primeroofing.example",
+      emailConfidence: "public",
+      status: "ready_for_outreach",
+      apolloPersonId: "apollo-person-abc123",
+    });
+  });
+
+  it("skips email reveal when allowEmailReveal is false", async () => {
+    process.env.APOLLO_API_KEY = "test-key";
+    const calls: string[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      calls.push(url);
+
+      if (url.includes("mixed_people/api_search")) {
+        return new Response(
+          JSON.stringify({
+            people: [
+              {
+                id: "apollo-person-xyz",
+                first_name: "Jane",
+                last_name: "Doe",
+                title: "ceo",
+                email_status: "likely",
+                linkedin_url: "https://linkedin.com/in/janedoe",
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(
+        "<html><body>Prime Roofing provides roof repair.</body></html>",
+        { headers: { "content-type": "text/html" } },
+      );
+    });
+
+    const [result] = await enrichCompanyIntelligence([lead()], true, 0, ["contacts"], false, {
+      allowEmailReveal: false,
+    });
+
+    expect(calls.some((url) => url.includes("people/match"))).toBe(false);
+    expect(result.keyPeople?.[0]?.email).toBeUndefined();
+    expect(result.keyPeople?.[0]?.status).toBe("ready_for_outreach");
+  });
+
+  it("extracts names from team page HTML and looks them up in Apollo by name+domain", async () => {
+    process.env.APOLLO_API_KEY = "test-key";
+    const matchCalls: Array<{ body: unknown }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+
+      if (url.includes("mixed_people/api_search")) {
+        return new Response(JSON.stringify({ people: [] }), { headers: { "content-type": "application/json" } });
+      }
+
+      if (url.includes("people/match")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        matchCalls.push({ body });
+        if (body["first_name"] === "Sarah" && body["last_name"] === "Connor") {
+          return new Response(
+            JSON.stringify({
+              person: {
+                id: "apollo-sarah",
+                first_name: "Sarah",
+                last_name: "Connor",
+                name: "Sarah Connor",
+                title: "Owner",
+                email: "sarah@primeroofing.example",
+                email_status: "verified",
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ person: null }), { headers: { "content-type": "application/json" } });
+      }
+
+      // Homepage + team page return HTML with a team section.
+      return new Response(
+        `<html><body>
+          <h2>Meet Our Team</h2>
+          <div class="team-member"><h3>Sarah Connor</h3><p>Owner</p></div>
+          <div class="team-member"><h3>John Reese</h3><p>Operations Manager</p></div>
+        </body></html>`,
+        { headers: { "content-type": "text/html" } },
+      );
+    });
+
+    const [result] = await enrichCompanyIntelligence([lead()], true, 0, ["contacts"], false, {
+      allowWebsiteNameLookup: true,
+      maxWebsiteNameLookups: 3,
+    });
+
+    expect(matchCalls.some((c) => (c.body as Record<string, unknown>)["first_name"] === "Sarah")).toBe(true);
+    const sarah = result.keyPeople?.find((p) => p.name === "Sarah Connor");
+    expect(sarah).toBeDefined();
+    expect(sarah?.email).toBe("sarah@primeroofing.example");
+    expect(sarah?.emailConfidence).toBe("public");
+    expect(sarah?.status).toBe("ready_for_outreach");
+    expect(sarah?.source).toBe("apollo");
+  });
+
+  it("skips website name lookup when allowWebsiteNameLookup is false", async () => {
+    process.env.APOLLO_API_KEY = "test-key";
+    const matchCalls: string[] = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("people/match")) {
+        matchCalls.push(url);
+      }
+      if (url.includes("mixed_people/api_search")) {
+        return new Response(JSON.stringify({ people: [] }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(
+        `<html><body><h2>Our Team</h2><h3>Mike Ross</h3><p>Partner</p></body></html>`,
+        { headers: { "content-type": "text/html" } },
+      );
+    });
+
+    await enrichCompanyIntelligence([lead()], true, 0, ["contacts"], false, {
+      allowWebsiteNameLookup: false,
+    });
+
+    expect(matchCalls).toHaveLength(0);
+  });
+
+  it("skips name lookup for names already found in Apollo domain search", async () => {
+    process.env.APOLLO_API_KEY = "test-key";
+    const matchCalls: Array<Record<string, unknown>> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+
+      if (url.includes("mixed_people/api_search")) {
+        return new Response(
+          JSON.stringify({
+            people: [
+              {
+                id: "apollo-dave",
+                first_name: "Dave",
+                last_name: "Grohl",
+                name: "Dave Grohl",
+                title: "owner",
+                email: "dave@primeroofing.example",
+                email_status: "verified",
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.includes("people/match")) {
+        matchCalls.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      }
+
+      return new Response(
+        `<html><body><h2>Meet Our Team</h2><h3>Dave Grohl</h3><p>Owner</p></body></html>`,
+        { headers: { "content-type": "text/html" } },
+      );
+    });
+
+    const [result] = await enrichCompanyIntelligence([lead()], true, 0, ["contacts"], false, {
+      allowWebsiteNameLookup: true,
+      maxWebsiteNameLookups: 3,
+    });
+
+    const daveMatchCall = matchCalls.find(
+      (c) => c["first_name"] === "Dave" && c["last_name"] === "Grohl",
+    );
+    expect(daveMatchCall).toBeUndefined();
+    expect(result.keyPeople?.find((p) => p.name === "Dave Grohl")?.email).toBe("dave@primeroofing.example");
+  });
+
+  it("rejects compound fake surnames like Givenshome and service words like Attic Cleaning", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(
+          `<html><body>
+            Stacey Givenshome - owner
+            In Attic Cleaning - partner
+            Kevin Roofbuilding - ceo
+            Maria Lopez - owner maria@primeroofing.example
+          </body></html>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    );
+
+    const [result] = await enrichCompanyIntelligence([lead()], true, 0, ["contacts"]);
+
+    const names = result.keyPeople?.map((p) => p.name) ?? [];
+    expect(names).not.toContain("Stacey Givenshome");
+    expect(names).not.toContain("In Attic Cleaning");
+    expect(names).not.toContain("Kevin Roofbuilding");
+    expect(names).toContain("Maria Lopez");
+  });
+
+  it("drops inferred-only contacts when the same role appears 4 or more times with no signal", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(
+          `<html><body>
+            James Whitmore - owner
+            Donna Carlsberg - owner
+            Travis Hendricks - owner
+            Sandra Wellington - owner
+          </body></html>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    );
+
+    const [result] = await enrichCompanyIntelligence([lead()], true, 0, ["contacts"]);
+
+    expect(result.keyPeople).toHaveLength(0);
+  });
+
+  it("falls back to Apollo company-name search when domain search returns no people", async () => {
+    process.env.APOLLO_API_KEY = "test-key";
+    const searchBodies: Array<{ url: string; params: string }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+
+      if (url.includes("mixed_people/api_search")) {
+        searchBodies.push({ url, params: url });
+        const byName = url.includes("q_organization_name");
+        return new Response(
+          JSON.stringify({
+            people: byName
+              ? [
+                  {
+                    id: "fallback-person",
+                    name: "Carlos Mendez",
+                    title: "owner",
+                    email: "carlos@primeroofing.example",
+                    email_status: "verified",
+                  },
+                ]
+              : [],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(
+        "<html><body>Prime Roofing provides roof repair.</body></html>",
+        { headers: { "content-type": "text/html" } },
+      );
+    });
+
+    const [result] = await enrichCompanyIntelligence([lead()], true, 0, ["contacts"]);
+
+    expect(searchBodies.length).toBeGreaterThanOrEqual(2);
+    expect(searchBodies.some((s) => s.url.includes("q_organization_name"))).toBe(true);
+    expect(result.keyPeople?.[0]).toMatchObject({
+      name: "Carlos Mendez",
+      email: "carlos@primeroofing.example",
+      source: "apollo",
+      status: "ready_for_outreach",
+    });
   });
 
   it("rejects malformed company contact emails glued to phone numbers", async () => {

@@ -55,6 +55,8 @@ export type OutreachStatus =
   | "not_interested"
   | "follow_up_needed";
 
+export type ContactCategory = "person" | "general_email" | "registry";
+
 export interface KeyPersonContact {
   name: string;
   role?: string;
@@ -63,6 +65,15 @@ export interface KeyPersonContact {
   linkedinUrl?: string;
   source: "website" | "apollo" | "linkedin-search" | "google-search" | "registry" | "inferred";
   status: "found" | "needs_email" | "ready_for_outreach";
+  apolloPersonId?: string;
+  firstName?: string;
+  lastNameObfuscated?: boolean;
+  companyMatchScore?: number;
+  roleFitScore?: number;
+  contactRank?: number;
+  revealStatus?: "not_requested" | "revealed" | "unavailable" | "failed";
+  category?: ContactCategory;
+  licenseNumber?: string;
 }
 
 export type ContactDiscoveryStrategy = "website-first" | "apollo-first" | "hybrid-quality";
@@ -70,6 +81,10 @@ export type ContactDiscoveryStrategy = "website-first" | "apollo-first" | "hybri
 export interface ContactDiscoveryConfig {
   strategy?: ContactDiscoveryStrategy;
   apolloEnabled?: boolean;
+  allowEmailReveal?: boolean;
+  maxEmailRevealsPerCompany?: number;
+  allowWebsiteNameLookup?: boolean;
+  maxWebsiteNameLookups?: number;
   genericFallbackEnabled?: boolean;
   allowInferredEmails?: boolean;
   maxContactsPerCompany?: number;
@@ -93,6 +108,7 @@ export interface CompanyLead extends CompanyCandidate {
   outreachStatus?: OutreachStatus;
   suggestedDemoInvite?: string;
   contactDiscoveryNotes?: string;
+  licenseNumbers?: Array<{ number: string; board: string; lookupUrl?: string }>;
 }
 
 export interface CollectorContext {

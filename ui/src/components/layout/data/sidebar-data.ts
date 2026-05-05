@@ -1,11 +1,11 @@
 import {
   Activity,
   BriefcaseBusiness,
+  Building2,
   Command,
   Database,
   MapPin,
   Sparkles,
-  UserRound,
 } from 'lucide-react'
 import { type SidebarData } from '../types'
 
@@ -32,19 +32,19 @@ export const sidebarData: SidebarData = {
           icon: Sparkles,
         },
         {
-          title: 'Inbox',
-          url: '/inbox',
-          icon: Activity,
+          title: 'Searcher',
+          url: '/searcher',
+          icon: MapPin,
+        },
+        {
+          title: 'Prospects',
+          url: '/prospects',
+          icon: Building2,
         },
         {
           title: 'Leads',
           url: '/leads',
           icon: BriefcaseBusiness,
-        },
-        {
-          title: 'Prospects',
-          url: '/prospects',
-          icon: MapPin,
         },
         {
           title: 'Pipeline',
@@ -62,19 +62,9 @@ export const sidebarData: SidebarData = {
           icon: Database,
         },
         {
-          title: 'Companies',
-          url: '/companies',
-          icon: Sparkles,
-        },
-        {
-          title: 'People',
-          url: '/people',
-          icon: UserRound,
-        },
-        {
-          title: 'Searcher',
-          url: '/searcher',
-          icon: MapPin,
+          title: 'Work Inbox',
+          url: '/inbox',
+          icon: Activity,
         },
         {
           title: 'Forms & Webhooks',

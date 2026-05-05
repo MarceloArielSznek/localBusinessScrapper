@@ -238,7 +238,7 @@ function placeToCandidate(place: GooglePlace, context: CollectorContext): Compan
 async function collectWithNewTextSearch(context: CollectorContext, apiKey: string): Promise<CompanyCandidate[]> {
   const candidates: CompanyCandidate[] = [];
   let nextPageToken: string | undefined;
-  const pageLimit = Math.min(context.maxPages, 10);
+  const pageLimit = Math.min(context.maxPages, 20);
   const geocoded = context.address ? await geocodeLocation(context, apiKey) : undefined;
   const baseRequest: TextSearchRequest = {
     textQuery: searchQuery(context),

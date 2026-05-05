@@ -16,7 +16,7 @@ export const scraperInputSchema = z.object({
   state: z.string().trim().optional(),
   address: z.string().trim().optional(),
   radiusMiles: z.coerce.number().int().min(1).max(250).optional(),
-  targetCount: z.coerce.number().int().min(1).max(250).default(25),
+  targetCount: z.coerce.number().int().min(1).max(100000).default(25),
   minReviews: z.coerce.number().int().min(0).optional(),
   minRating: z.coerce.number().min(0).max(5).optional(),
   fallback: z.coerce.boolean().default(true),

@@ -13,6 +13,9 @@ import type {
   PeopleExportRequest,
   ProspectConversionInput,
   ScrapeRequest,
+  SearchCampaign,
+  SearchCampaignItem,
+  SearchCampaignRequest,
 } from './types'
 
 async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
@@ -44,6 +47,14 @@ export function getLeads(file: string): Promise<LeadsResponse> {
 
 export function getJobs(): Promise<{ jobs: ApiJob[] }> {
   return apiFetch('/api/jobs')
+}
+
+export function getSearchCampaigns(): Promise<{ campaigns: SearchCampaign[] }> {
+  return apiFetch('/api/search-campaigns')
+}
+
+export function getSearchCampaignItems(campaignId: string): Promise<{ items: SearchCampaignItem[] }> {
+  return apiFetch(`/api/search-campaigns/${encodeURIComponent(campaignId)}/items`)
 }
 
 export function getJob(jobId: string): Promise<{ job: ApiJob }> {
@@ -202,6 +213,13 @@ export function startScrape(payload: ScrapeRequest): Promise<{ job: ApiJob }> {
   })
 }
 
+export function startSearchCampaign(payload: SearchCampaignRequest): Promise<{ campaign: SearchCampaign; job: ApiJob }> {
+  return apiFetch('/api/search-campaigns', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export function startEnrichment(
   file: string,
   refresh = false
@@ -221,6 +239,24 @@ export function startSelectedEnrichment(
   return apiFetch('/api/db/enrich-selected', {
     method: 'POST',
     body: JSON.stringify({ leadIds, refresh, task, contactConfig }),
+  })
+}
+
+export function startApolloPeopleSearch(
+  leadIds: string[],
+  refresh = false,
+  onlyDecisionMakers = false
+): Promise<{ job: ApiJob }> {
+  return apiFetch('/api/db/apollo-people-search', {
+    method: 'POST',
+    body: JSON.stringify({ leadIds, refresh, onlyDecisionMakers }),
+  })
+}
+
+export function revealApolloEmail(personId: string): Promise<{ person: Record<string, unknown> }> {
+  return apiFetch('/api/db/apollo-email-reveal', {
+    method: 'POST',
+    body: JSON.stringify({ personId }),
   })
 }
 

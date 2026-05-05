@@ -53,6 +53,8 @@ export interface CompanyLead {
   sourceUrls: string[]
 }
 
+export type ContactCategory = 'person' | 'general_email' | 'registry'
+
 export interface KeyPersonContact {
   name: string
   role?: string
@@ -61,6 +63,15 @@ export interface KeyPersonContact {
   linkedinUrl?: string
   source: 'website' | 'apollo' | 'linkedin-search' | 'google-search' | 'registry' | 'inferred'
   status: 'found' | 'needs_email' | 'ready_for_outreach'
+  apolloPersonId?: string
+  firstName?: string
+  lastNameObfuscated?: boolean
+  companyMatchScore?: number
+  roleFitScore?: number
+  contactRank?: number
+  revealStatus?: 'not_requested' | 'revealed' | 'unavailable' | 'failed'
+  category?: ContactCategory
+  licenseNumber?: string
 }
 
 export type ContactDiscoveryStrategy = 'website-first' | 'apollo-first' | 'hybrid-quality'
@@ -68,6 +79,10 @@ export type ContactDiscoveryStrategy = 'website-first' | 'apollo-first' | 'hybri
 export interface ContactDiscoveryConfig {
   strategy: ContactDiscoveryStrategy
   apolloEnabled: boolean
+  allowEmailReveal: boolean
+  maxEmailRevealsPerCompany: number
+  allowWebsiteNameLookup: boolean
+  maxWebsiteNameLookups: number
   genericFallbackEnabled: boolean
   allowInferredEmails: boolean
   maxContactsPerCompany: number
@@ -150,12 +165,99 @@ export interface PeopleExportRequest {
 export type EnrichmentTask = 'full' | 'contacts' | 'summary' | 'missing-data'
 
 export interface CrmDashboard {
+  companies: number
   prospects: number
   leads: number
   opportunities: number
   demos: number
   openTasks: number
   inboxItems: number
+  funnel: {
+    companies: number
+    prospects: number
+    readyProspects: number
+    convertedLeads: number
+    opportunities: number
+    demos: number
+    leadConversionRate: number
+    demoBookingRate: number
+  }
+  quality: {
+    averageFitScore: number
+    averageLeadScore: number
+    averageRating: number
+    averageReviews: number
+    minReviewsMatched: number
+    summariesComplete: number
+    highScoreProspects: number
+    missingContactInfo: number
+  }
+  readiness: {
+    withPrimaryPerson: number
+    readyContacts: number
+    contactsWithEmail: number
+    needsEmailContacts: number
+    missingWebsite: number
+    missingPhone: number
+    missingEmail: number
+  }
+  actions: {
+    overdueTasks: number
+    dueTodayTasks: number
+    upcomingFollowUps: number
+    readyUnconvertedProspects: number
+    scheduledDemos: number
+    inboxNeedsReview: number
+  }
+  pipeline: {
+    openValue: number
+    weightedValue: number
+    won: number
+    lost: number
+    byStage: Array<{
+      stage: string
+      count: number
+      value: number
+      weightedValue: number
+    }>
+  }
+  prospectStatus: Array<{ status: string; count: number }>
+  topProspects: Array<{
+    id: string
+    companyName: string
+    status: string
+    service?: string | null
+    area?: string | null
+    score: number
+    rating: number
+    reviewCount: number
+    primaryPersonName?: string | null
+    primaryPersonEmail?: string | null
+  }>
+  recentRuns: Array<{
+    id: string
+    service: string
+    area: string
+    createdAt: string
+    leads: number
+    qualified: number
+    readyContacts: number
+    averageScore: number
+  }>
+  topServices: Array<{
+    service: string
+    prospects: number
+    qualified: number
+    readyContacts: number
+    averageScore: number
+  }>
+  topAreas: Array<{
+    area: string
+    prospects: number
+    qualified: number
+    readyContacts: number
+    averageScore: number
+  }>
 }
 
 export interface CrmLeadInput {
@@ -202,4 +304,67 @@ export interface ScrapeRequest {
   headless: boolean
   maxPagesPerSource: number
   delayMs: number
+}
+
+export interface SearchCampaignRequest extends Omit<ScrapeRequest, 'targetCount'> {
+  name?: string
+  serviceGroups?: SearchCampaignGroup[]
+  areaGroups?: SearchCampaignGroup[]
+  totalTarget: number
+  targetPerSearch: number
+}
+
+export interface SearchCampaignGroup {
+  name: string
+  items: string[]
+  state?: string
+}
+
+export interface SearchCampaign {
+  id: string
+  name: string
+  status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled'
+  services: string[]
+  areas: string[]
+  service_groups?: SearchCampaignGroup[]
+  area_groups?: SearchCampaignGroup[]
+  total_target: number
+  target_per_search: number
+  min_reviews?: number
+  min_rating?: number
+  max_pages_per_source: number
+  auto_enrich: boolean
+  total_searches: number
+  completed_searches: number
+  failed_searches: number
+  discovered_count: number
+  saved_count: number
+  unique_company_count: number
+  item_count?: number
+  complete_items?: number
+  failed_items?: number
+  active_items?: number
+  created_at: string
+  updated_at: string
+}
+
+export interface SearchCampaignItem {
+  id: string
+  campaign_id: string
+  service: string
+  area: string
+  service_group?: string
+  area_group?: string
+  area_state?: string
+  status: 'queued' | 'running' | 'complete' | 'failed' | 'skipped'
+  run_id?: string
+  discovered_count: number
+  unique_count: number
+  qualified_count: number
+  saved_count: number
+  error_message?: string
+  started_at?: string
+  completed_at?: string
+  created_at: string
+  updated_at: string
 }
